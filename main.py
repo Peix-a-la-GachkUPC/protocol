@@ -211,7 +211,7 @@ async def run_bridge(
             acceptor_ids=membership["acceptor_ids"],
             learner_ids=membership["learner_ids"],
             local_acceptor_ids=membership["local_acceptor_ids"],
-            local_learner_ids=[],
+            local_learner_ids=membership["local_learner_ids"],
             start_proposer=False,
             use_network=True,
             network_idle_loops=max(50, network_idle_loops // 20),
