@@ -164,6 +164,7 @@ def create_connections(connect_peer:str, port):
     global peer_list
     connect_peer = _normalize_url(connect_peer)
     r = requests.get(url = connect_peer+"/get_peers")
+    print("hola:",r.text)
     peer_list = []
     for peer_url in json.loads(r.text):
         _add_peer(peer_url)

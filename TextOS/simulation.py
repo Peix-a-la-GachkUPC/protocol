@@ -1,3 +1,4 @@
+import logging
 from collections import deque
 from json import JSONDecodeError
 from time import sleep
@@ -15,6 +16,15 @@ from TextOS.protocol import (
     BasicTextOSLearnerProtocol,
     BasicTextOSProposerProtocol,
 )
+
+log = logging.getLogger("TextOS.paxos")
+
+
+def _ids_repr(ids: list[str], *, max_len: int = 200) -> str:
+    s = str(ids)
+    if len(s) <= max_len:
+        return s
+    return s[: max_len - 3] + "..."
 
 
 class LocalTextOSNetwork:
@@ -73,9 +83,11 @@ class NetworkBroadcastTextOSNetwork:
             local_agent = self._agents.get(t)
             if local_agent is not None:
                 self._local_queue.append((t, msg))
+                log.debug("local: to=%s %s", t, type(msg).__name__)
                 continue
             payload = encode_envelope(t, msg)
             self.nc.send(payload)
+            log.info("wire out: to=%s %s", t, type(msg).__name__)
 
     def _drain_local(self) -> int:
         processed = 0
@@ -112,6 +124,7 @@ class NetworkBroadcastTextOSNetwork:
                     to, pmsg = decode_envelope(s)
                 except (JSONDecodeError, TypeError, ValueError, KeyError):
                     continue
+                log.info("wire in: to=%s %s", to, type(pmsg).__name__)
                 agent = self._agents.get(to)
                 if agent is not None:
                     agent.dispatch(pmsg)
@@ -251,6 +264,19 @@ def run_synod(
     run_learner_ids = (
         learner_ids if local_learner_ids is None else list(local_learner_ids)
     )
+    log.info(
+        "synod start: use_network=%s start_proposer=%s proposer_id=%s "
+        "local_acceptors=%d %s local_learners=%d %s acceptors=%s learners=%s",
+        use_network,
+        start_proposer,
+        proposer_pid,
+        len(run_acceptor_ids),
+        _ids_repr(list(run_acceptor_ids)),
+        len(run_learner_ids),
+        _ids_repr(list(run_learner_ids)),
+        _ids_repr(list(acceptor_ids)),
+        _ids_repr(list(learner_ids)),
+    )
 
     for aid in run_acceptor_ids:
         if aid in config.acceptor_ids:
@@ -277,4 +303,5 @@ def run_synod(
     else:
         assert isinstance(net, LocalTextOSNetwork)
         net.drain()
+    log.info("synod end: learned=%s", learned_flag[0])
     return learned_box[0] if learned_box else None

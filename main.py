@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import logging
 from typing import Any
 
 from network import connection
@@ -266,16 +267,37 @@ def parse_args() -> argparse.Namespace:
         default=getattr(conf, "NETWORK_IDLE_SLEEP", 0.001),
         help="Sleep in seconds per empty poll while waiting for Paxos traffic",
     )
+    parser.add_argument(
+        "--paxos-log-level",
+        choices=["none", "info", "debug"],
+        default="info",
+        help="Verbosity for TextOS.paxos (none silences paxos logs)",
+    )
     return parser.parse_args()
+
+
+def _setup_paxos_logging(level: str) -> None:
+    plog = logging.getLogger("TextOS.paxos")
+    if level == "none":
+        plog.handlers.clear()
+        plog.setLevel(logging.CRITICAL + 1)
+        return
+    if level == "debug":
+        plog.setLevel(logging.DEBUG)
+    else:
+        plog.setLevel(logging.INFO)
+    if not plog.handlers:
+        h = logging.StreamHandler()
+        h.setFormatter(logging.Formatter("%(levelname)s [paxos] %(message)s"))
+        plog.addHandler(h)
+    plog.propagate = False
 
 
 def main() -> None:
     args = parse_args()
-    connect_peer = args.connect_peer
-    if connect_peer is None and args.network_protocol.upper() == "HTTP":
-        connect_peer = getattr(conf, "NETWORK_CONNECT_PEER", None)
-        if connect_peer is None:
-            connect_peer = getattr(conf, "HTTP_CONNECT_PEER", None)
+    _setup_paxos_logging(args.paxos_log_level)
+
+    print(args.network_protocol)
 
     try:
         asyncio.run(
@@ -283,7 +305,7 @@ def main() -> None:
                 ws_host=args.ws_host,
                 ws_port=args.ws_port,
                 network_protocol=args.network_protocol,
-                connect_peer=connect_peer,
+                connect_peer=conf.HTTP_CONNECT_PEER,
                 default_file=args.default_file,
                 poll_interval=args.poll_interval,
                 network_idle_loops=args.network_idle_loops,

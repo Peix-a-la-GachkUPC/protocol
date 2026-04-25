@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import subprocess
 import sys
 from pathlib import Path
@@ -7,6 +8,8 @@ from pathlib import Path
 from TextOS.config import TextOSConfig
 from TextOS.messages import Proposal
 from TextOS.simulation import run_synod
+
+_log = logging.getLogger("TextOS.paxos")
 
 TEXTOS_DIR = Path(".textos")
 
@@ -221,6 +224,15 @@ def prepare_and_acknowledge(
     if start_proposer:
         n = _next_ballot(file, data_actual)
         proposal = Proposal(n, changes)
+        _log.info(
+            "round start: file=%s proposer_id=%s ballot N=%s len(changes)=%d",
+            file,
+            proposer_id,
+            proposal.number,
+            len(changes),
+        )
+    else:
+        _log.info("passive pump")
     config = TextOSConfig(acceptor_ids, learner_ids)
 
     row = None
@@ -243,9 +255,20 @@ def prepare_and_acknowledge(
         local_learner_ids=local_learner_ids,
         start_proposer=start_proposer,
     )
+    persisted = False
     if row is not None:
         already_seen = any(int(r.get("N", 0) or 0) == int(row["N"]) for r in data_actual)
         if not already_seen:
             data_actual.append(row)
             save_TextOS(file, data_actual)
+            persisted = True
+    if row is not None:
+        _log.info(
+            "round end: file=%s N=%s persisted=%s",
+            file,
+            row["N"],
+            persisted,
+        )
+    else:
+        _log.info("no value learned")
     return row
