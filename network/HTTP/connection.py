@@ -20,6 +20,11 @@ recv_list = []
 def _normalize_url(raw_url: str) -> str:
     return raw_url.rstrip("/")
 
+
+def _default_url(host: str, port: int) -> str:
+    announce_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    return f"http://{announce_host}:{port}"
+
 def _add_peer(raw_url: str) -> None:
     global peer_list
     peer_url = _normalize_url(raw_url)
@@ -33,7 +38,7 @@ def setup():
     global HOST_NAME, SERVER_PORT, URL
     HOST_NAME = conf.HTTP_HOST
     SERVER_PORT = conf.HTTP_PORT
-    URL = f"http://127.0.0.1:{SERVER_PORT}"
+    URL = _default_url(HOST_NAME, SERVER_PORT)
 
 
 class MyServer(BaseHTTPRequestHandler):
@@ -90,20 +95,13 @@ class MyServer(BaseHTTPRequestHandler):
             args (dict[str, str]): arguments (url)
         """
         global peer_list
-        if "url" in args.keys() and len(args["url"]) > 0:
-            _add_peer(args["url"][0])
-            self.send_response(200)
-            self.send_header("Content-type", "text/html")
-            self.end_headers()
-            return
-
-        if "port" not in args.keys():
+        if not "port" in args.keys():
             self.send_response(400)
             self.send_header("Content-type", "text/html")
             self.end_headers()
             return
 
-        _add_peer(f"http://{self.client_address[0]}:{args['port'][0]}")
+        _add_peer(f"http://{self.client_address[0]}:{args["port"][0]}")
 
         self.send_response(200)
         self.send_header("Content-type", "text/html")
@@ -139,9 +137,9 @@ def send(value:str):
     """
     print(peer_list)
     for peer_url in peer_list:
-        url = peer_url+"/data"
+        target_url = peer_url+"/data"
         params = {'value': value}
-        r = requests.get(url = url, params = params, verify=False)
+        requests.get(url=target_url, params=params, verify=False)
 
 def server_loop(host:str, port:int):
     """The server loop, creates the server in a new thread
@@ -170,21 +168,15 @@ def create_connections(connect_peer:str, port):
     """
     global peer_list
 
-    print("connect")
     connect_peer = _normalize_url(connect_peer)
-    r = requests.get(url = connect_peer+"/get_peers")
-    print("hola:",r.text)
+    peer_response = requests.get(url=connect_peer+"/get_peers")
     peer_list = []
-    for peer_url in json.loads(r.text):
+    for peer_url in json.loads(peer_response.text):
         _add_peer(peer_url)
     print(peer_list, type(peer_list))
     _add_peer(connect_peer)
     for peer_url in peer_list:
-        requests.get(
-            url=f"{peer_url}/connect",
-            params={"url": URL},
-            verify=False,
-        )
+        requests.get(url = f"{peer_url}/connect?port={port}")
 
 def start_server(
     connect_peer: str | None = None,
@@ -203,7 +195,7 @@ def start_server(
     if public_url is not None:
         URL = public_url.rstrip("/")
     else:
-        URL = f"http://{HOST_NAME}:{SERVER_PORT}"
+        URL = _default_url(HOST_NAME, SERVER_PORT)
 
     print("connect_peer", connect_peer)
 
