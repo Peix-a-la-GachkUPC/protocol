@@ -1,4 +1,4 @@
-import hyperswarm
+import network.hyperswarm.hyperswarm as hyperswarm
 
 hs = hyperswarm.HyperswarmInterface()
 
