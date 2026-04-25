@@ -1,17 +1,146 @@
+import hashlib
 import json
-import os
 from pathlib import Path
 
 from TextOS.config import TextOSConfig
 from TextOS.messages import Proposal
-from TextOS.reduce import reconstruct_text
 from TextOS.simulation import run_synod
 
 TEXTOS_DIR = Path(".textos")
 
+# P2P-safe: unlikely to clash with user "hola.txt" or editor temp files.
+PAXOS_BALLOT_CACHE_NAME = ".__p2p__textos__ballot__cache__.json"
+
+
+def storage_filename_for_logical(logical_file: str) -> str:
+    """
+    Map a logical document path (as used by peers, e.g. ``hola.py``) to the
+    on-disk log name under ``TEXTOS_DIR``.
+
+    * ``hola.py`` → ``hola.txt.json``
+    * ``src/hola.py`` → ``hola.<hash10>.txt.json`` (same stem in different dirs)
+    """
+    p = Path(logical_file)
+    stem = p.stem
+    parent = p.parent
+    if parent in (Path("."), Path("")):
+        return f"{stem}.txt.json"
+    digest = hashlib.sha256(p.as_posix().encode("utf-8")).hexdigest()[:10]
+    return f"{stem}.{digest}.txt.json"
+
+
+_resolved_ballot_cache_path: Path | None = None
+
+
+def _payload_is_ballot_cache(data) -> bool:
+    if not isinstance(data, dict):
+        return False
+    for k, v in data.items():
+        if not isinstance(k, str):
+            return False
+        try:
+            int(v)
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
+def _file_is_ballot_cache(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return False
+    return _payload_is_ballot_cache(data)
+
+
+def _iter_ballot_cache_path_candidates():
+    base = PAXOS_BALLOT_CACHE_NAME
+    yield TEXTOS_DIR / base
+    stem = Path(base).stem
+    for i in range(1, 64):
+        yield TEXTOS_DIR / f"{stem}._{i}.json"
+    h = hashlib.sha256(PAXOS_BALLOT_CACHE_NAME.encode("utf-8")).hexdigest()[:16]
+    yield TEXTOS_DIR / f".__p2p_ballot_shadow__{h}__.json"
+
+
+def _resolve_ballot_cache_path() -> Path:
+    """
+    Pick the first usable path: missing (new), or an existing valid cache JSON.
+    If the canonical name is a directory or a non-cache file, try the next
+    candidates so we never clobber foreign data and all peers use the same order.
+    """
+    global _resolved_ballot_cache_path
+    if _resolved_ballot_cache_path is not None:
+        p = _resolved_ballot_cache_path
+        if not p.exists():
+            return p
+        if p.is_file() and (_file_is_ballot_cache(p) or p.stat().st_size == 0):
+            return p
+        _resolved_ballot_cache_path = None
+    TEXTOS_DIR.mkdir(parents=True, exist_ok=True)
+    for p in _iter_ballot_cache_path_candidates():
+        if p.is_dir():
+            continue
+        if not p.exists():
+            _resolved_ballot_cache_path = p
+            return p
+        if p.is_file() and _file_is_ballot_cache(p):
+            _resolved_ballot_cache_path = p
+            return p
+    for n in range(256):
+        h = hashlib.sha256(f"{PAXOS_BALLOT_CACHE_NAME}:{n}".encode()).hexdigest()[:12]
+        p = TEXTOS_DIR / f".__p2p_ballot_fallback__{h}__.json"
+        if p.is_dir():
+            continue
+        if not p.exists() or (p.is_file() and _file_is_ballot_cache(p)):
+            _resolved_ballot_cache_path = p
+            return p
+    raise RuntimeError("TextOS: no free ballot cache path under TEXTOS_DIR")
+
+
+def _load_ballot_cache() -> dict[str, int]:
+    path = _resolve_ballot_cache_path()
+    if not path.is_file():
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        if _payload_is_ballot_cache(data):
+            return {str(k): int(v) for k, v in data.items()}
+    except (json.JSONDecodeError, OSError, TypeError, ValueError):
+        pass
+    return {}
+
+
+def _save_ballot_cache(cache: dict[str, int]) -> None:
+    path = _resolve_ballot_cache_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(cache, fh, indent=2, sort_keys=True)
+    tmp.replace(path)
+
+
+def _max_n_in_log(data: list) -> int:
+    if not data:
+        return 0
+    return max(int(row.get("N", 0) or 0) for row in data)
+
+
+def _resolve_store_key(logical_file: str) -> str:
+    return storage_filename_for_logical(logical_file)
+
+
+def _path_for_store_key(store_key: str) -> Path:
+    return TEXTOS_DIR / store_key
+
 
 def load_TextOS(file: str) -> list:
-    path = TEXTOS_DIR / file
+    store_key = _resolve_store_key(file)
+    path = _path_for_store_key(store_key)
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
         return []
@@ -20,25 +149,39 @@ def load_TextOS(file: str) -> list:
 
 
 def save_TextOS(file: str, data: list) -> None:
-    path = TEXTOS_DIR / file
+    store_key = _resolve_store_key(file)
+    path = _path_for_store_key(store_key)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=2)
+    m = _max_n_in_log(data)
+    cache = _load_ballot_cache()
+    if m > cache.get(store_key, 0):
+        cache[store_key] = m
+        _save_ballot_cache(cache)
 
 
-def _next_ballot(data: list) -> int:
-    if not data:
-        return 1
-    return max(row.get("N", 0) for row in data) + 1
+def _next_ballot(logical_file: str, data: list) -> int:
+    store_key = _resolve_store_key(logical_file)
+    m_disk = _max_n_in_log(data)
+    cache = _load_ballot_cache()
+    m_cached = cache.get(store_key, 0)
+    m = max(m_disk, m_cached)
+    if m_disk > m_cached:
+        cache[store_key] = m_disk
+        _save_ballot_cache(cache)
+    return m + 1
 
 
 def prepare_and_acknowledge(file: str, changes: list[dict]) -> dict | None:
     """
-    Phase 1-2 (prepare + accept) via BasicTextOS* protocols on a local network.
-    Persists when the learner observes a weighted majority of identical accepts.
+    One Paxos instance: prepare + accept; persists to the log for ``file`` (logical
+    path, mapped to ``{stem}.txt.json``) when the learner sees a weighted majority
+    of matching accepts. Ballot high-water is cached in ``PAXOS_BALLOT_CACHE_NAME``
+    to avoid O(n) scans on large logs (reconciled with the log when merged P2P).
     """
     data_actual = load_TextOS(file)
-    n = _next_ballot(data_actual)
+    n = _next_ballot(file, data_actual)
     proposal = Proposal(n, changes)
     acceptor_ids = ["a1", "a2", "a3"]
     learner_ids = ["l1"]
@@ -62,116 +205,3 @@ def prepare_and_acknowledge(file: str, changes: list[dict]) -> dict | None:
         data_actual.append(row)
         save_TextOS(file, data_actual)
     return row
-
-
-def accept(file: str, n: int, changes: list[dict]) -> None:
-    """Compatibility hook: full round-trip is implemented in prepare_and_acknowledge."""
-    _ = load_TextOS(file)
-    prepare_and_acknowledge(file, changes)
-
-
-def learn(file: str, n: int, changes: list[dict]) -> None:
-    """Learner persistence is triggered from accept responses inside prepare_and_acknowledge."""
-    _ = load_TextOS(file)
-    _ = n, changes
-
-
-def demo_concurrent_inserts() -> None:
-    """
-    Two separate Paxos rounds (two writers): both indices refer to the same base string.
-    Replay merges inserts without losing either line.
-    """
-    os.chdir(Path(__file__).resolve().parent)
-    base = "me gustan los platanos"
-    demo_file = "d.json"
-    path = TEXTOS_DIR / demo_file
-    if path.exists():
-        path.unlink()
-
-    r1 = prepare_and_acknowledge(
-        demo_file,
-        [{"index": 3, "insert": "hola"}],
-    )
-    r2 = prepare_and_acknowledge(
-        demo_file,
-        [{"index": 4, "insert": "adios"}],
-    )
-    r3 = prepare_and_acknowledge(
-        demo_file,
-        [
-            {"delete": {"index": 14, "delete": 8}},
-            {"insert": "caracas"},
-        ],
-    )
-    log_data = load_TextOS(demo_file)
-    final = reconstruct_text(base, log_data)
-    print("--- Short demo (A/B + C) ---")
-    print("Committed rounds:", [r1, r2, r3])
-    print("Reconstructed text:", final)
-    assert final == "me holagadiosustan los caracas", final
-
-
-def demo_ide_readme_scenario() -> None:
-    """
-    A realistic small README: two editors on the same snapshot, a delete, rename, footer.
-    Indices are UTF-8 code points (Python str offsets), like an IDE line buffer in memory.
-    """
-    os.chdir(Path(__file__).resolve().parent)
-    base = (
-        "# TextOS\n"
-        "\n"
-        "A tiny paxos-backed buffer.\n"
-        "Status: WIP"
-    )
-    path_file = "scenario.json"
-    path = TEXTOS_DIR / path_file
-    if path.exists():
-        path.unlink()
-
-    # Two writers, same file snapshot: title badge + a note in the first body line
-    prepare_and_acknowledge(path_file, [{"index": 8, "insert": " v1"}])
-    prepare_and_acknowledge(path_file, [{"index": 10, "insert": "Note: "}])
-    # Remove the trailing "WIP" in base coordinates; then rename the line prefix
-    prepare_and_acknowledge(
-        path_file,
-        [
-            {
-                "delete": {
-                    "index": 46,  # 'W' of "WIP" in the initial snapshot
-                    "delete": 3,
-                }
-            }
-        ],
-    )
-    prepare_and_acknowledge(
-        path_file,
-        [{"old": "Status: ", "new": "State: ", "count": 1}],
-    )
-    prepare_and_acknowledge(
-        path_file,
-        [{"insert": "\n---\n# MIT\n"}],
-    )
-
-    log_data = load_TextOS(path_file)
-    out = reconstruct_text(base, log_data)
-    want = (
-        "# TextOS v1\n"
-        "\n"
-        "Note: A tiny paxos-backed buffer.\n"
-        "State: \n"
-        "---\n"
-        "# MIT\n"
-    )
-    print("--- Realistic IDE README (scenario.json) ---")
-    print("Final buffer:\n", out, sep="")
-    assert out == want, f"\nGOT: {out!r}\nEXP: {want!r}"
-
-
-def main() -> None:
-    os.chdir(Path(__file__).resolve().parent)
-    demo_concurrent_inserts()
-    demo_ide_readme_scenario()
-
-
-if __name__ == "__main__":
-    main()
