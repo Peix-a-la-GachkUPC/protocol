@@ -3,6 +3,7 @@ import asyncio
 import importlib.util
 import json
 import logging
+import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,7 +31,7 @@ class EditConsensus:
     def __init__(self, node_id: str, logger: logging.Logger) -> None:
         self.node_id = node_id
         self.logger = logger
-        self.logical_clock = 0
+        self.last_timestamp = 0
         self.best_proposal = Proposal(tstamp=0, origin="", data={})
         self.active_proposal = False
         self.active_proposal_votes: set[str] = set()
@@ -90,7 +91,7 @@ class EditConsensus:
             return None
 
     def _on_proposal(self, proposal: Proposal) -> Any | None:
-        self.logical_clock = max(self.logical_clock, proposal.tstamp)
+        self.last_timestamp = max(self.last_timestamp, proposal.tstamp)
         self.logger.debug(
             "Received proposal tstamp=%d origin=%s active=%s best_tstamp=%d",
             proposal.tstamp,
@@ -192,6 +193,11 @@ class EditConsensus:
             return self._apply_proposal(self.best_proposal)
         return None
 
+    def _next_timestamp(self) -> int:
+        now_ns = time.time_ns()
+        self.last_timestamp = max(self.last_timestamp + 1, now_ns)
+        return self.last_timestamp
+
     def _apply_proposal(self, proposal: Proposal) -> Any | None:
         self.logger.info("Proposal committed tstamp=%d origin=%s", proposal.tstamp, proposal.origin)
         self.active_proposal = False
@@ -218,9 +224,8 @@ class EditConsensus:
             return
 
         payload = self.pending_local_edits.popleft()
-        self.logical_clock += 1
         proposal = Proposal(
-            tstamp=self.logical_clock,
+            tstamp=self._next_timestamp(),
             origin=self.node_id,
             data=payload,
         )
