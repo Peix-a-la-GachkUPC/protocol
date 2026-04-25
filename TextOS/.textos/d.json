@@ -1,0 +1,34 @@
+[
+  {
+    "N": 1,
+    "changes": [
+      {
+        "index": 3,
+        "insert": "hola"
+      }
+    ]
+  },
+  {
+    "N": 2,
+    "changes": [
+      {
+        "index": 4,
+        "insert": "adios"
+      }
+    ]
+  },
+  {
+    "N": 3,
+    "changes": [
+      {
+        "delete": {
+          "index": 14,
+          "delete": 8
+        }
+      },
+      {
+        "insert": "caracas"
+      }
+    ]
+  }
+]
