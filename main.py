@@ -326,6 +326,14 @@ class EditConsensus:
         if not isinstance(remote_op["index"], int):
             return
 
+        remote_file = remote_op.get("file")
+        local_file = local_op.get("file")
+        if isinstance(remote_file, str) and isinstance(local_file, str):
+            if remote_file != local_file:
+                return
+        elif isinstance(remote_file, str) != isinstance(local_file, str):
+            return
+
         local_index = local_op["index"]
         remote_index = remote_op["index"]
 
@@ -404,14 +412,16 @@ class EditConsensus:
             return None
 
         index = op["index"]
+        file_value = op.get("file")
+        file_field: dict[str, Any] = {"file": file_value} if isinstance(file_value, str) else {}
 
         if "add" in op and isinstance(op["add"], str):
-            return {"index": index, "del": len(op["add"])}
+            return {"index": index, "del": len(op["add"]), **file_field}
 
         if "del" in op and isinstance(op["del"], int):
             deleted_text = op.get("deleted_text")
             if isinstance(deleted_text, str):
-                return {"index": index, "add": deleted_text}
+                return {"index": index, "add": deleted_text, **file_field}
             return None
 
         return None
