@@ -188,8 +188,6 @@ def create_connections(connect_peer:str, port):
 
 def start_server(
     connect_peer: str | None = None,
-    host: str = HOST_NAME,
-    port: int = SERVER_PORT,
     public_url: str | None = None,
 ):
     """Starts the server
@@ -202,22 +200,17 @@ def start_server(
     """
     global HOST_NAME, SERVER_PORT, URL
 
-    HOST_NAME = host
-    SERVER_PORT = port
-
     if public_url is not None:
         URL = public_url.rstrip("/")
-    elif host in ("0.0.0.0", "::"):
-        URL = f"http://127.0.0.1:{port}"
     else:
-        URL = f"http://{host}:{port}"
+        URL = f"http://{HOST_NAME}:{SERVER_PORT}"
 
     print("connect_peer", connect_peer)
 
     if not connect_peer == None:
-        create_connections(connect_peer, port)
+        create_connections(connect_peer, SERVER_PORT)
 
-    t = Thread(target=server_loop, args=(host, port,))
+    t = Thread(target=server_loop, args=(HOST_NAME, SERVER_PORT,))
     t.daemon = True
     t.start()
 
@@ -227,7 +220,7 @@ if __name__ == "__main__":
         peer = None
     else:
         peer = argv[2]
-    start_server(port = int(argv[1]), connect_peer=peer)
+    start_server(connect_peer=peer)
     
     if (argv[1] == "8082"):
         print("test")
