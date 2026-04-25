@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+from collections import deque
 import hashlib
 import json
 import logging
@@ -194,6 +195,95 @@ def _normalize_paxos_payload(
     return logical_file, changes
 
 
+def _map_pos_through_insert(pos: int, at: int, length: int) -> int:
+    if pos >= at:
+        return pos + length
+    return pos
+
+
+def _map_pos_through_delete(pos: int, at: int, length: int) -> int:
+    end = at + length
+    if pos < at:
+        return pos
+    if pos >= end:
+        return pos - length
+    return at
+
+
+def _rebase_change_against_remote(change: dict[str, Any], remote: dict[str, Any]) -> dict[str, Any]:
+    rebased = dict(change)
+
+    if (
+        isinstance(remote.get("insert"), str)
+        and isinstance(remote.get("index"), int)
+        and remote["index"] >= 0
+    ):
+        insert_at = remote["index"]
+        insert_len = len(remote["insert"])
+        if insert_len == 0:
+            return rebased
+
+        if isinstance(rebased.get("index"), int):
+            rebased["index"] = _map_pos_through_insert(rebased["index"], insert_at, insert_len)
+
+        delete_obj = rebased.get("delete")
+        if isinstance(delete_obj, dict):
+            start = delete_obj.get("index")
+            length = delete_obj.get("delete")
+            if isinstance(start, int) and isinstance(length, int) and length >= 0:
+                end = start + length
+                new_start = _map_pos_through_insert(start, insert_at, insert_len)
+                new_end = _map_pos_through_insert(end, insert_at, insert_len)
+                new_delete = dict(delete_obj)
+                new_delete["index"] = new_start
+                new_delete["delete"] = max(0, new_end - new_start)
+                rebased["delete"] = new_delete
+
+        return rebased
+
+    delete_obj = remote.get("delete")
+    if isinstance(delete_obj, dict):
+        remote_start = delete_obj.get("index")
+        remote_len = delete_obj.get("delete")
+        if (
+            isinstance(remote_start, int)
+            and isinstance(remote_len, int)
+            and remote_start >= 0
+            and remote_len > 0
+        ):
+            if isinstance(rebased.get("index"), int):
+                rebased["index"] = _map_pos_through_delete(
+                    rebased["index"], remote_start, remote_len
+                )
+
+            local_delete_obj = rebased.get("delete")
+            if isinstance(local_delete_obj, dict):
+                start = local_delete_obj.get("index")
+                length = local_delete_obj.get("delete")
+                if isinstance(start, int) and isinstance(length, int) and length >= 0:
+                    end = start + length
+                    new_start = _map_pos_through_delete(start, remote_start, remote_len)
+                    new_end = _map_pos_through_delete(end, remote_start, remote_len)
+                    new_delete = dict(local_delete_obj)
+                    new_delete["index"] = new_start
+                    new_delete["delete"] = max(0, new_end - new_start)
+                    rebased["delete"] = new_delete
+
+    return rebased
+
+
+def _rebase_changes_against_remote(
+    local_changes: list[dict[str, Any]],
+    remote_changes: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    rebased = [dict(ch) for ch in local_changes]
+    for remote in remote_changes:
+        if not isinstance(remote, dict):
+            continue
+        rebased = [_rebase_change_against_remote(ch, remote) for ch in rebased]
+    return rebased
+
+
 async def run_bridge(
     ws_host: str,
     ws_port: int,
@@ -217,9 +307,82 @@ async def run_bridge(
     proposer_idle_sleep = network_idle_sleep if network_idle_sleep > 0 else 0.001
     bridge = ExtensionBridge(host=ws_host, port=ws_port)
     paxos_round_lock = asyncio.Lock()
+    pending_lock = asyncio.Lock()
+    pending_event = asyncio.Event()
+    pending_edits: deque[dict[str, Any]] = deque()
+    file_revisions: dict[str, int] = {}
     self_endpoint = _normalize_endpoint(connection.self_url())
     membership = _derive_paxos_membership()
     _validate_membership(membership, self_endpoint=self_endpoint)
+
+    async def _record_remote_commit(
+        logical_file: str,
+        remote_changes: list[dict[str, Any]],
+    ) -> None:
+        async with pending_lock:
+            new_rev = file_revisions.get(logical_file, 0) + 1
+            file_revisions[logical_file] = new_rev
+            for item in pending_edits:
+                if item["file"] != logical_file:
+                    continue
+                if item["base_rev"] >= new_rev:
+                    continue
+                item["changes"] = _rebase_changes_against_remote(
+                    item["changes"],
+                    remote_changes,
+                )
+                item["base_rev"] = new_rev
+
+    async def _process_pending_edits() -> None:
+        while True:
+            await pending_event.wait()
+            while True:
+                async with pending_lock:
+                    if not pending_edits:
+                        pending_event.clear()
+                        break
+                    item = pending_edits.popleft()
+
+                logical_file = item["file"]
+                changes = item["changes"]
+
+                try:
+                    async with paxos_round_lock:
+                        nonlocal membership
+                        membership = _derive_paxos_membership()
+                        _validate_membership(membership, self_endpoint=self_endpoint)
+                        ballot_stride, ballot_offset = _ballot_params(membership)
+                        row = await asyncio.to_thread(
+                            prepare_and_acknowledge,
+                            logical_file,
+                            changes,
+                            proposer_id=membership["proposer_id"],
+                            acceptor_ids=membership["acceptor_ids"],
+                            learner_ids=membership["learner_ids"],
+                            local_acceptor_ids=membership["local_acceptor_ids"],
+                            local_learner_ids=membership["local_learner_ids"],
+                            use_network=True,
+                            network_idle_loops=network_idle_loops,
+                            network_idle_sleep_s=proposer_idle_sleep,
+                            ballot_stride=ballot_stride,
+                            ballot_offset=ballot_offset,
+                        )
+                    if row is not None:
+                        commit = json.dumps(
+                            {
+                                "kind": "textos_commit",
+                                "file": logical_file,
+                                "changes": row["changes"],
+                            },
+                            ensure_ascii=False,
+                        )
+                        connection.send(commit)
+                except Exception as exc:
+                    await bridge.send(
+                        {"error": str(exc), "file": logical_file, "value": "[]"}
+                    )
+
+    worker_task = asyncio.create_task(_process_pending_edits())
 
     async def _run_passive_acceptor_once() -> None:
         nonlocal membership
@@ -247,39 +410,16 @@ async def run_bridge(
             await bridge.send({"error": str(exc), "value": "[]"})
             return
 
-        try:
-            async with paxos_round_lock:
-                nonlocal membership
-                membership = _derive_paxos_membership()
-                _validate_membership(membership, self_endpoint=self_endpoint)
-                ballot_stride, ballot_offset = _ballot_params(membership)
-                row = await asyncio.to_thread(
-                    prepare_and_acknowledge,
-                    logical_file,
-                    changes,
-                    proposer_id=membership["proposer_id"],
-                    acceptor_ids=membership["acceptor_ids"],
-                    learner_ids=membership["learner_ids"],
-                    local_acceptor_ids=membership["local_acceptor_ids"],
-                    local_learner_ids=membership["local_learner_ids"],
-                    use_network=True,
-                    network_idle_loops=network_idle_loops,
-                    network_idle_sleep_s=proposer_idle_sleep,
-                    ballot_stride=ballot_stride,
-                    ballot_offset=ballot_offset,
-                )
-            if row is not None:
-                commit = json.dumps(
-                    {
-                        "kind": "textos_commit",
-                        "file": logical_file,
-                        "changes": row["changes"],
-                    },
-                    ensure_ascii=False,
-                )
-                connection.send(commit)
-        except Exception as exc:
-            await bridge.send({"error": str(exc), "file": logical_file, "value": "[]"})
+        async with pending_lock:
+            base_rev = file_revisions.get(logical_file, 0)
+            pending_edits.append(
+                {
+                    "file": logical_file,
+                    "changes": [dict(change) for change in changes],
+                    "base_rev": base_rev,
+                }
+            )
+            pending_event.set()
 
     bridge.on_message(on_extension_message)
     await bridge.start()
@@ -290,10 +430,6 @@ async def run_bridge(
 
     try:
         while True:
-            if paxos_round_lock.locked():
-                await asyncio.sleep(poll_interval)
-                continue
-
             incoming = connection.nrecv()
             if incoming is not None:
                 preview = incoming if len(incoming) <= 140 else (incoming[:137] + "...")
@@ -302,13 +438,19 @@ async def run_bridge(
                 _validate_membership(membership, self_endpoint=self_endpoint)
                 commit = _decode_commit_payload(incoming)
                 if commit is not None:
-                    _, changes = commit
+                    logical_file, changes = commit
+                    await _record_remote_commit(logical_file, changes)
                     await bridge.send(_extension_value_payload(changes))
                 elif _is_paxos_wire(incoming):
                     connection.requeue(incoming)
                     await _run_passive_acceptor_once()
             await asyncio.sleep(poll_interval)
     finally:
+        worker_task.cancel()
+        try:
+            await worker_task
+        except asyncio.CancelledError:
+            pass
         await bridge.stop()
 
 
