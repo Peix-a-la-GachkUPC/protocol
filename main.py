@@ -44,10 +44,12 @@ def _derive_paxos_membership() -> dict[str, Any]:
     self_key = _node_key(self_endpoint)
     endpoint_keys = [_node_key(endpoint) for endpoint in endpoints]
     proposer_id = f"p:{self_key}"
+    proposer_ids = [f"p:{key}" for key in endpoint_keys]
     acceptor_ids = [f"a:{key}" for key in endpoint_keys]
     learner_ids = [f"l:{key}" for key in endpoint_keys]
     return {
         "proposer_id": proposer_id,
+        "proposer_ids": proposer_ids,
         "acceptor_ids": acceptor_ids,
         "learner_ids": learner_ids,
         "local_acceptor_ids": [f"a:{self_key}"],
@@ -71,9 +73,15 @@ def _is_loopback_endpoint(endpoint: str) -> bool:
 
 
 def _validate_membership(membership: dict[str, Any], *, self_endpoint: str) -> None:
+    proposer_ids = list(membership.get("proposer_ids", []))
     acceptor_ids = list(membership.get("acceptor_ids", []))
     learner_ids = list(membership.get("learner_ids", []))
 
+    if len(set(proposer_ids)) != len(proposer_ids):
+        raise RuntimeError(
+            "Duplicate proposer IDs derived from cluster endpoints. "
+            "Set a stable unique conf.NETWORK_NODE_ID per node."
+        )
     if len(set(acceptor_ids)) != len(acceptor_ids):
         raise RuntimeError(
             "Duplicate acceptor IDs derived from cluster endpoints. "
@@ -95,6 +103,20 @@ def _validate_membership(membership: dict[str, Any], *, self_endpoint: str) -> N
             "Cluster has remote peers but local identity is loopback "
             f"({self_endpoint}). Set conf.NETWORK_NODE_ID to your LAN/public URL."
         )
+
+
+def _ballot_params(membership: dict[str, Any]) -> tuple[int, int]:
+    proposer_ids = list(membership.get("proposer_ids", []))
+    proposer_id = membership.get("proposer_id")
+    if not proposer_ids:
+        return 1, 0
+    if proposer_id not in proposer_ids:
+        raise RuntimeError(
+            "Local proposer ID is not present in cluster proposer membership."
+        )
+    stride = len(proposer_ids)
+    offset = proposer_ids.index(proposer_id)
+    return stride, offset
 
 
 def _extension_value_payload(changes: list[dict[str, Any]]) -> dict[str, str]:
@@ -230,6 +252,7 @@ async def run_bridge(
                 nonlocal membership
                 membership = _derive_paxos_membership()
                 _validate_membership(membership, self_endpoint=self_endpoint)
+                ballot_stride, ballot_offset = _ballot_params(membership)
                 row = await asyncio.to_thread(
                     prepare_and_acknowledge,
                     logical_file,
@@ -242,6 +265,8 @@ async def run_bridge(
                     use_network=True,
                     network_idle_loops=network_idle_loops,
                     network_idle_sleep_s=proposer_idle_sleep,
+                    ballot_stride=ballot_stride,
+                    ballot_offset=ballot_offset,
                 )
             if row is not None:
                 commit = json.dumps(

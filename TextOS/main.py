@@ -166,7 +166,13 @@ def save_TextOS(file: str, data: list) -> None:
         _save_ballot_cache(cache)
 
 
-def _next_ballot(logical_file: str, data: list) -> int:
+def _next_ballot(
+    logical_file: str,
+    data: list,
+    *,
+    ballot_stride: int = 1,
+    ballot_offset: int = 0,
+) -> int:
     store_key = _resolve_store_key(logical_file)
     m_disk = _max_n_in_log(data)
     cache = _load_ballot_cache()
@@ -175,7 +181,16 @@ def _next_ballot(logical_file: str, data: list) -> int:
     if m_disk > m_cached:
         cache[store_key] = m_disk
         _save_ballot_cache(cache)
-    return m + 1
+    if ballot_stride < 1:
+        raise ValueError("ballot_stride must be >= 1")
+    if ballot_offset < 0 or ballot_offset >= ballot_stride:
+        raise ValueError("ballot_offset must satisfy 0 <= ballot_offset < ballot_stride")
+
+    candidate = m + 1
+    if ballot_stride == 1 and ballot_offset == 0:
+        return candidate
+
+    return candidate + ((ballot_offset - (candidate % ballot_stride)) % ballot_stride)
 
 
 def prepare_and_acknowledge(
@@ -191,6 +206,8 @@ def prepare_and_acknowledge(
     use_network: bool = False,
     network_idle_loops: int = 10_000,
     network_idle_sleep_s: float = 0.0,
+    ballot_stride: int = 1,
+    ballot_offset: int = 0,
 ) -> dict | None:
     """
     One Paxos instance: prepare + accept; persists to the log for ``file`` (logical
@@ -222,7 +239,12 @@ def prepare_and_acknowledge(
 
     proposal = None
     if start_proposer:
-        n = _next_ballot(file, data_actual)
+        n = _next_ballot(
+            file,
+            data_actual,
+            ballot_stride=ballot_stride,
+            ballot_offset=ballot_offset,
+        )
         proposal = Proposal(n, changes)
         _log.info(
             "round start: file=%s proposer_id=%s ballot N=%s len(changes)=%d",
