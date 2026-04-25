@@ -6,7 +6,7 @@ from sys import argv
 import json
 import requests
 
-HOST_NAME = "localhost"
+HOST_NAME = "0.0.0.0"
 SERVER_PORT = 8080
 URL = f"https://{HOST_NAME}:{SERVER_PORT}"
 
