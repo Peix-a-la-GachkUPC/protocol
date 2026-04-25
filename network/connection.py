@@ -102,13 +102,13 @@ def create(discover_peer:str|None):
 
 
 def self_url() -> str:
+    node_id = getattr(conf, "NETWORK_NODE_ID", None) if conf is not None else None
+    if isinstance(node_id, str) and node_id.strip() != "":
+        return _normalize_url(node_id)
     match (PROTOCOL):
         case ("HTTP"):
             return _normalize_url(http_connection.URL)
         case ("hyperswarm"):
-            node_id = getattr(conf, "NETWORK_NODE_ID", None) if conf is not None else None
-            if isinstance(node_id, str) and node_id.strip() != "":
-                return _normalize_url(node_id)
             return "hyperswarm:local"
         case (_):
             raise ValueError("Protocol desconegut")

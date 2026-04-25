@@ -54,6 +54,16 @@ def _derive_paxos_membership() -> dict[str, Any]:
     }
 
 
+def _membership_contains_local_roles(membership: dict[str, Any]) -> bool:
+    local_acceptors = membership.get("local_acceptor_ids", [])
+    local_learners = membership.get("local_learner_ids", [])
+    acceptors = set(membership.get("acceptor_ids", []))
+    learners = set(membership.get("learner_ids", []))
+    return all(a in acceptors for a in local_acceptors) and all(
+        l in learners for l in local_learners
+    )
+
+
 def _extension_value_payload(changes: list[dict[str, Any]]) -> dict[str, str]:
     return {"value": json.dumps(changes, ensure_ascii=False)}
 
@@ -145,8 +155,16 @@ async def run_bridge(
     proposer_idle_sleep = network_idle_sleep if network_idle_sleep > 0 else 0.001
     bridge = ExtensionBridge(host=ws_host, port=ws_port)
     paxos_round_lock = asyncio.Lock()
+    membership = _derive_paxos_membership()
+    if not _membership_contains_local_roles(membership):
+        raise RuntimeError(
+            "Local Paxos role IDs do not belong to cluster membership. "
+            "Set conf.NETWORK_NODE_ID to a stable public endpoint (for example "
+            "http://10.0.0.12:8080) so every node derives consistent IDs."
+        )
 
     async def _run_passive_acceptor_once() -> None:
+        nonlocal membership
         membership = _derive_paxos_membership()
         await asyncio.to_thread(
             prepare_and_acknowledge,
@@ -172,6 +190,7 @@ async def run_bridge(
 
         try:
             async with paxos_round_lock:
+                nonlocal membership
                 membership = _derive_paxos_membership()
                 row = await asyncio.to_thread(
                     prepare_and_acknowledge,
@@ -216,6 +235,7 @@ async def run_bridge(
             if incoming is not None:
                 preview = incoming if len(incoming) <= 140 else (incoming[:137] + "...")
                 print(f"[connection] inbound data={preview!r}")
+                membership = _derive_paxos_membership()
                 commit = _decode_commit_payload(incoming)
                 if commit is not None:
                     _, changes = commit
