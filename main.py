@@ -42,6 +42,7 @@ class EditConsensus:
         self.active_proposal = False
         self.active_proposal_votes: set[str] = set()
         self.pending_local_edits: deque[Any] = deque()
+        self.active_local_edit: Any | None = None
 
     def on_plugin_edit(self, data: Any) -> None:
         self.pending_local_edits.append(data)
@@ -115,6 +116,7 @@ class EditConsensus:
             self._accept_proposal(proposal)
             self._try_commit_active_proposal()
         elif self._is_better(proposal, self.best_proposal):
+            self._on_local_proposal_superseded()
             self._send_consensus(self.best_proposal, accepted=False)
             self._accept_proposal(proposal)
             self._try_commit_active_proposal()
@@ -161,6 +163,16 @@ class EditConsensus:
         self.best_proposal = proposal
         self.active_proposal = True
         self.active_proposal_votes = {proposal.origin, self.node_id}
+
+    def _on_local_proposal_superseded(self) -> None:
+        if self.best_proposal is None:
+            return
+        if self.best_proposal.origin != self.node_id:
+            return
+        if self.active_local_edit is None:
+            return
+        self.pending_local_edits.appendleft(self.active_local_edit)
+        self.active_local_edit = None
 
     def _is_better(self, incoming: Proposal, current: Proposal) -> bool:
         return incoming.tstamp < current.tstamp
@@ -217,7 +229,10 @@ class EditConsensus:
         self.best_proposal = None
         self.active_proposal_votes = set()
 
-        if proposal.origin != self.node_id:
+        if proposal.origin == self.node_id:
+            self.active_local_edit = None
+        else:
+            self._rebase_local_edits_against_remote_commit(proposal)
             self.emit_to_bridge(proposal.data)
         self._try_start_next_local_proposal()
 
@@ -232,7 +247,9 @@ class EditConsensus:
         self.active_proposal_votes = set()
 
         if rejected.origin == self.node_id:
-            self.pending_local_edits.appendleft(rejected.data)
+            if self.active_local_edit is not None:
+                self.pending_local_edits.appendleft(self.active_local_edit)
+                self.active_local_edit = None
 
         self._try_start_next_local_proposal()
 
@@ -250,9 +267,84 @@ class EditConsensus:
         self.best_proposal = proposal
         self.active_proposal = True
         self.active_proposal_votes = {self.node_id}
+        self.active_local_edit = payload
         self.logger.info("Starting local proposal tstamp=%d", proposal.tstamp)
         self._send_proposal(proposal)
         self._try_commit_active_proposal()
+
+    def _rebase_local_edits_against_remote_commit(self, proposal: Proposal) -> None:
+        remote_ops = self._as_ops(proposal.data)
+        if remote_ops is None:
+            return
+
+        if self.active_local_edit is not None:
+            self.active_local_edit = self._rebase_payload(remote_ops, self.active_local_edit, proposal.origin)
+            if self.best_proposal is not None and self.best_proposal.origin == self.node_id:
+                self.best_proposal.data = self.active_local_edit
+
+        rebased_pending: deque[Any] = deque()
+        while self.pending_local_edits:
+            payload = self.pending_local_edits.popleft()
+            rebased_pending.append(self._rebase_payload(remote_ops, payload, proposal.origin))
+        self.pending_local_edits = rebased_pending
+
+    def _as_ops(self, payload: Any) -> list[dict[str, Any]] | None:
+        if not isinstance(payload, list):
+            return None
+
+        ops: list[dict[str, Any]] = []
+        for entry in payload:
+            if not isinstance(entry, dict):
+                return None
+            if "index" not in entry:
+                return None
+            ops.append(dict(entry))
+        return ops
+
+    def _rebase_payload(self, remote_ops: list[dict[str, Any]], payload: Any, remote_origin: str) -> Any:
+        local_ops = self._as_ops(payload)
+        if local_ops is None:
+            return payload
+
+        rebased = [dict(op) for op in local_ops]
+        for remote_op in remote_ops:
+            for local_op in rebased:
+                self._shift_local_index(remote_op, local_op, remote_origin)
+        return rebased
+
+    def _shift_local_index(self, remote_op: dict[str, Any], local_op: dict[str, Any], remote_origin: str) -> None:
+        if "index" not in local_op:
+            return
+        if not isinstance(local_op["index"], int):
+            return
+
+        if "index" not in remote_op:
+            return
+        if not isinstance(remote_op["index"], int):
+            return
+
+        local_index = local_op["index"]
+        remote_index = remote_op["index"]
+
+        if "add" in remote_op and isinstance(remote_op["add"], str):
+            remote_len = len(remote_op["add"])
+            if remote_len <= 0:
+                return
+
+            same_index_remote_first = remote_index == local_index and remote_origin < self.node_id
+            if remote_index < local_index or same_index_remote_first:
+                local_op["index"] = local_index + remote_len
+            return
+
+        if "del" in remote_op and isinstance(remote_op["del"], int):
+            remote_len = remote_op["del"]
+            if remote_len <= 0:
+                return
+            if remote_index >= local_index:
+                return
+
+            shift = min(remote_len, local_index - remote_index)
+            local_op["index"] = local_index - shift
 
 
 def _encode_for_network(message: Message) -> str:
