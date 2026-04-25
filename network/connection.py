@@ -1,4 +1,4 @@
-import HTTP.connection
+import  network.HTTP.connection as http_connection
 
 PROTOCOL = ""
 
@@ -13,7 +13,7 @@ def recv() -> str:
     """
     match (PROTOCOL):
         case ("HTTP"):
-            return HTTP.connection.recv()
+            return http_connection.recv()
         case (_):
             raise ValueError("Protocol desconegut")
 
@@ -28,7 +28,7 @@ def nrecv() -> str|None:
     """
     match (PROTOCOL):
         case ("HTTP"):
-            return HTTP.connection.nrecv()
+            return http_connection.nrecv()
         case (_):
             raise ValueError("Protocol desconegut")
     
@@ -43,11 +43,20 @@ def send(data:str):
     """
     match (PROTOCOL):
         case ("HTTP"):
-            HTTP.connection.send(data)
+            http_connection.send(data)
         case (_):
             raise ValueError("Protocol desconegut")
 
-def create(protocol: str, discover_peer:str):
+def setup(protocol:str):
+    global PROTOCOL
+    PROTOCOL = protocol
+    match (PROTOCOL):
+        case ("HTTP"):
+            http_connection.setup()
+        case (_):
+            raise ValueError("Protocol desconegut")
+
+def create(discover_peer:str):
     """Creates he connection to the network
 
     Args:
@@ -58,9 +67,9 @@ def create(protocol: str, discover_peer:str):
         ValueError: If incorrect protocol is chosen
     """
     global PROTOCOL
-    PROTOCOL = protocol
     match (PROTOCOL):
         case ("HTTP"):
-            HTTP.connection.start_server(connect_peer=discover_peer)
+            http_connection.start_server(connect_peer=discover_peer)
         case (_):
             raise ValueError("Protocol desconegut")
+

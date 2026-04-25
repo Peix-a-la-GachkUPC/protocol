@@ -3,19 +3,12 @@ import asyncio
 import json
 from typing import Any
 
-from network.HTTP import connection as http_connection
+from network import connection
 from plugin.extension_bridge import ExtensionBridge, Message
-
-
-def _configure_http_connection(host: str, port: int, public_url: str | None) -> None:
-    http_connection.HOST_NAME = host
-    http_connection.SERVER_PORT = port
-    if public_url:
-        http_connection.URL = public_url.rstrip("/")
-    elif host in ("0.0.0.0", "::"):
-        http_connection.URL = f"http://127.0.0.1:{port}"
-    else:
-        http_connection.URL = f"http://{host}:{port}"
+try:
+    import conf
+except ImportError:
+    raise ImportError("Copy conf.py.example to conf.py and configure it")
 
 
 def _encode_for_network(message: Message) -> str:
@@ -27,19 +20,11 @@ def _encode_for_network(message: Message) -> str:
 async def run_bridge(
     ws_host: str,
     ws_port: int,
-    http_host: str,
-    http_port: int,
-    http_public_url: str | None,
     connect_peer: str | None,
     poll_interval: float,
 ) -> None:
-    _configure_http_connection(http_host, http_port, http_public_url)
-    http_connection.start_server(
-        connect_peer=connect_peer,
-        host=http_host,
-        port=http_port,
-        public_url=http_public_url,
-    )
+    connection.setup("HTTP")
+    connection.create(connect_peer)
 
     bridge = ExtensionBridge(host=ws_host, port=ws_port)
 
@@ -49,19 +34,18 @@ async def run_bridge(
         else:
             payload = message
 
-        http_connection.send(_encode_for_network(payload))
+        connection.send(_encode_for_network(payload))
 
     bridge.on_message(on_extension_message)
     await bridge.start()
 
     print(f"Extension bridge listening on ws://{ws_host}:{ws_port}")
-    print(f"HTTP peer server listening on http://{http_host}:{http_port}")
     if connect_peer:
         print(f"Connected via seed peer: {connect_peer}")
 
     try:
         while True:
-            incoming = http_connection.nrecv()
+            incoming = connection.nrecv()
             if incoming is not None:
                 preview = incoming if len(incoming) <= 140 else (incoming[:137] + "...")
                 print(f"[http] inbound data={preview!r}")
@@ -70,46 +54,14 @@ async def run_bridge(
     finally:
         await bridge.stop()
 
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Run extension<->python<->HTTP network bridge",
-    )
-    parser.add_argument("--ws-host", default="127.0.0.1", help="WebSocket host")
-    parser.add_argument("--ws-port", type=int, default=42069, help="WebSocket port")
-    parser.add_argument("--http-host", default="0.0.0.0", help="HTTP peer host")
-    parser.add_argument("--http-port", type=int, default=8080, help="HTTP peer port")
-    parser.add_argument(
-        "--http-public-url",
-        default=None,
-        help="Reachable URL advertised to peers (example: http://192.168.1.5:8080)",
-    )
-    parser.add_argument(
-        "--connect-peer",
-        default=None,
-        help="Existing peer URL (example: http://127.0.0.1:8080)",
-    )
-    parser.add_argument(
-        "--poll-interval",
-        type=float,
-        default=0.05,
-        help="Polling interval in seconds for incoming network messages",
-    )
-    return parser.parse_args()
-
-
 def main() -> None:
-    args = parse_args()
     try:
         asyncio.run(
             run_bridge(
-                ws_host=args.ws_host,
-                ws_port=args.ws_port,
-                http_host=args.http_host,
-                http_port=args.http_port,
-                http_public_url=args.http_public_url,
-                connect_peer=args.connect_peer,
-                poll_interval=args.poll_interval,
+                ws_host=conf.WS_HOST,
+                ws_port=conf.WS_PORT,
+                connect_peer=conf.HTTP_CONNECT_PEER,
+                poll_interval=conf.POLL_INTERVAL,
             )
         )
     except KeyboardInterrupt:
