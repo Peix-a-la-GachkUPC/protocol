@@ -173,12 +173,27 @@ def _next_ballot(logical_file: str, data: list) -> int:
     return m + 1
 
 
-def prepare_and_acknowledge(file: str, changes: list[dict]) -> dict | None:
+def prepare_and_acknowledge(
+    file: str,
+    changes: list[dict],
+    *,
+    use_network: bool = False,
+    network_idle_loops: int = 10_000,
+    network_idle_sleep_s: float = 0.0,
+) -> dict | None:
     """
     One Paxos instance: prepare + accept; persists to the log for ``file`` (logical
     path, mapped to ``{stem}.txt.json``) when the learner sees a weighted majority
     of matching accepts. Ballot high-water is cached in ``PAXOS_BALLOT_CACHE_NAME``
     to avoid O(n) scans on large logs (reconciled with the log when merged P2P).
+
+    When ``use_network`` is True, Paxos frames are sent via
+    ``network.connection.send`` and received with ``network.connection.nrecv`` (one
+    JSON envelope per logical target). The host must have configured
+    ``network.connection`` (for example set ``network.connection.PROTOCOL`` to the
+    value expected by the transport, start the server, and establish peers) so that
+    ``send`` and ``nrecv`` are operational before calling this. For a purely local
+    in-process run, leave ``use_network`` False.
     """
     data_actual = load_TextOS(file)
     n = _next_ballot(file, data_actual)
@@ -200,6 +215,9 @@ def prepare_and_acknowledge(file: str, changes: list[dict]) -> dict | None:
         acceptor_ids,
         learner_ids,
         on_learned=on_learned,
+        use_network=use_network,
+        network_idle_loops=network_idle_loops,
+        network_idle_sleep_s=network_idle_sleep_s,
     )
     if row is not None:
         data_actual.append(row)

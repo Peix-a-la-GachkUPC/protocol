@@ -20,7 +20,19 @@ from .main import (
     save_TextOS,
     storage_filename_for_logical,
 )
+from .paxos_json import (
+    WIRE_VERSION,
+    decode_envelope,
+    encode_envelope,
+    proposal_from_dict,
+    proposal_to_dict,
+)
 from .reduce import reconstruct_text
+from .simulation import (
+    NetworkBroadcastTextOSNetwork,
+    dispatch_paxos_wire,
+    run_synod,
+)
 
 __all__ = [
     "AcceptMsg",
@@ -30,14 +42,22 @@ __all__ = [
     "BasicTextOSLearnerProtocol",
     "BasicTextOSProposerProtocol",
     "BasicTextOSProtocol",
+    "NetworkBroadcastTextOSNetwork",
     "PrepareMsg",
     "PrepareResponseMsg",
     "PAXOS_BALLOT_CACHE_NAME",
     "Proposal",
     "TEXTOS_DIR",
+    "WIRE_VERSION",
+    "decode_envelope",
+    "dispatch_paxos_wire",
+    "encode_envelope",
     "load_TextOS",
     "prepare_and_acknowledge",
+    "proposal_from_dict",
+    "proposal_to_dict",
     "reconstruct_text",
+    "run_synod",
     "save_TextOS",
     "storage_filename_for_logical",
 ]
