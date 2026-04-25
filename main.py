@@ -271,13 +271,19 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    connect_peer = args.connect_peer
+    if connect_peer is None and args.network_protocol.upper() == "HTTP":
+        connect_peer = getattr(conf, "NETWORK_CONNECT_PEER", None)
+        if connect_peer is None:
+            connect_peer = getattr(conf, "HTTP_CONNECT_PEER", None)
+
     try:
         asyncio.run(
             run_bridge(
                 ws_host=args.ws_host,
                 ws_port=args.ws_port,
                 network_protocol=args.network_protocol,
-                connect_peer=args.connect_peer,
+                connect_peer=connect_peer,
                 default_file=args.default_file,
                 poll_interval=args.poll_interval,
                 network_idle_loops=args.network_idle_loops,
