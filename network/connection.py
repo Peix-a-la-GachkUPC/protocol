@@ -1,6 +1,18 @@
-import HTTP.connection
+import  network.HTTP.connection as http_connection
+import network.hyperswarm.connection as hyperswarm_connection
+
+try:
+    import conf
+except ImportError:
+    conf = None
+
 
 PROTOCOL = ""
+_requeue_buffer: list[str] = []
+
+
+def _normalize_url(raw_url: str) -> str:
+    return raw_url.rstrip("/")
 
 def recv() -> str:
     """Recieves data, if not data has arrived it waits for it
@@ -11,9 +23,13 @@ def recv() -> str:
     Returns:
         str: Recieved data
     """
+    if _requeue_buffer:
+        return _requeue_buffer.pop(0)
     match (PROTOCOL):
         case ("HTTP"):
-            return HTTP.connection.recv()
+            return http_connection.recv()
+        case ("hyperswarm"):
+            return hyperswarm_connection.recv()
         case (_):
             raise ValueError("Protocol desconegut")
 
@@ -26,9 +42,13 @@ def nrecv() -> str|None:
     Returns:
         str|None: drecieved data
     """
+    if _requeue_buffer:
+        return _requeue_buffer.pop(0)
     match (PROTOCOL):
         case ("HTTP"):
-            return HTTP.connection.nrecv()
+            return http_connection.nrecv()
+        case ("hyperswarm"):
+            return hyperswarm_connection.nrecv()
         case (_):
             raise ValueError("Protocol desconegut")
     
@@ -43,11 +63,24 @@ def send(data:str):
     """
     match (PROTOCOL):
         case ("HTTP"):
-            HTTP.connection.send(data)
+            http_connection.send(data)
+        case ("hyperswarm"):
+            hyperswarm_connection.send(data)
         case (_):
             raise ValueError("Protocol desconegut")
 
-def create(protocol: str, discover_peer:str):
+def setup(protocol:str):
+    global PROTOCOL
+    PROTOCOL = protocol
+    match (PROTOCOL):
+        case ("HTTP"):
+            http_connection.setup()
+        case ("hyperswarm"):
+            pass
+        case (_):
+            raise ValueError("Protocol desconegut")
+
+def create(discover_peer:str|None):
     """Creates he connection to the network
 
     Args:
@@ -58,9 +91,47 @@ def create(protocol: str, discover_peer:str):
         ValueError: If incorrect protocol is chosen
     """
     global PROTOCOL
-    PROTOCOL = protocol
     match (PROTOCOL):
         case ("HTTP"):
-            HTTP.connection.start_server(connect_peer=discover_peer)
+            http_connection.start_server(connect_peer=discover_peer)
+        case ("hyperswarm"):
+            if discover_peer is not None:
+                hyperswarm_connection.create(discover_peer)
         case (_):
             raise ValueError("Protocol desconegut")
+
+
+def self_url() -> str:
+    match (PROTOCOL):
+        case ("HTTP"):
+            return _normalize_url(http_connection.URL)
+        case ("hyperswarm"):
+            node_id = getattr(conf, "NETWORK_NODE_ID", None) if conf is not None else None
+            if isinstance(node_id, str) and node_id.strip() != "":
+                return _normalize_url(node_id)
+            return "hyperswarm:local"
+        case (_):
+            raise ValueError("Protocol desconegut")
+
+
+def peers() -> list[str]:
+    match (PROTOCOL):
+        case ("HTTP"):
+            return [_normalize_url(p) for p in http_connection.peer_list if isinstance(p, str)]
+        case ("hyperswarm"):
+            configured = (
+                getattr(conf, "NETWORK_PEER_IDENTITIES", [])
+                if conf is not None
+                else []
+            )
+            return [
+                _normalize_url(p)
+                for p in configured
+                if isinstance(p, str) and p.strip() != ""
+            ]
+        case (_):
+            raise ValueError("Protocol desconegut")
+
+
+def requeue(data: str) -> None:
+    _requeue_buffer.insert(0, data)

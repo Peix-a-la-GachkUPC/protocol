@@ -5,6 +5,10 @@ from threading import Thread
 from sys import argv
 import json
 import requests
+try:
+    import conf
+except ImportError:
+    raise ImportError("Copy conf.py.example to conf.py and configure it")
 
 HOST_NAME = "0.0.0.0"
 SERVER_PORT = 8080
@@ -13,24 +17,24 @@ URL = f"http://127.0.0.1:{SERVER_PORT}"
 peer_list = []
 recv_list = []
 
-
 def _normalize_url(raw_url: str) -> str:
     return raw_url.rstrip("/")
-
-
-def _self_url() -> str:
-    return _normalize_url(URL)
-
 
 def _add_peer(raw_url: str) -> None:
     global peer_list
     peer_url = _normalize_url(raw_url)
     if peer_url == "":
         return
-    if peer_url == _self_url():
-        return
     if peer_url not in peer_list:
         peer_list.append(peer_url)
+
+
+def setup():
+    global HOST_NAME, SERVER_PORT, URL
+    HOST_NAME = conf.HTTP_HOST
+    SERVER_PORT = conf.HTTP_PORT
+    URL = f"http://127.0.0.1:{SERVER_PORT}"
+
 
 class MyServer(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -182,7 +186,7 @@ def start_server(
         port (int, optional): local port. Defaults to SERVER_PORT.
         public_url (str, optional): url advertised to peers. Defaults to None.
     """
-    global URL, HOST_NAME, SERVER_PORT
+    global HOST_NAME, SERVER_PORT, URL
 
     HOST_NAME = host
     SERVER_PORT = port
