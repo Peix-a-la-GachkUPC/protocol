@@ -59,8 +59,7 @@ class EditConsensus:
             proposal = self._proposal_from_dict(envelope)
             if proposal is None:
                 return None
-            self._on_proposal(proposal)
-            return None
+            return self._on_proposal(proposal)
 
         if message_type == "consensus":
             consensus = self._consensus_from_dict(envelope)
@@ -90,7 +89,7 @@ class EditConsensus:
         except (KeyError, TypeError, ValueError):
             return None
 
-    def _on_proposal(self, proposal: Proposal) -> None:
+    def _on_proposal(self, proposal: Proposal) -> Any | None:
         self.logical_clock = max(self.logical_clock, proposal.tstamp)
         self.logger.debug(
             "Received proposal tstamp=%d origin=%s active=%s best_tstamp=%d",
@@ -107,16 +106,16 @@ class EditConsensus:
                 self._send_consensus(proposal, accepted=True)
                 self.best_proposal = proposal
                 self.active_proposal_votes = {proposal.origin, self.node_id}
-                self._maybe_commit_active_proposal()
+                return self._maybe_commit_active_proposal()
             else:
                 self._send_consensus(proposal, accepted=False)
-            return
+            return None
 
         self._send_consensus(proposal, accepted=True)
         self.best_proposal = proposal
         self.active_proposal = True
         self.active_proposal_votes = {proposal.origin, self.node_id}
-        self._maybe_commit_active_proposal()
+        return self._maybe_commit_active_proposal()
 
     def _on_consensus(self, consensus: Consensus) -> Any | None:
         self.logger.debug(
