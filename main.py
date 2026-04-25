@@ -366,6 +366,14 @@ async def run_bridge(
                     _pending_ops_buffer.append(change)
             _pending_flush_timer = _pending_flush_interval
 
+    async def _add_to_pending_buffer(changes: list[Operation]) -> None:
+        global _pending_flush_timer
+        async with _pending_ops_lock:
+            for change in changes:
+                if change.get("add") or change.get("del"):
+                    _pending_ops_buffer.append(change)
+            _pending_flush_timer = _pending_flush_interval
+
     async def _force_flush_and_send(commit_msg: str, logical_file: str) -> None:
         ops = await _flush_pending_ops(force=True)
         if not ops:
