@@ -106,7 +106,8 @@ class EditConsensus:
                     self._send_consensus(self.best_proposal, accepted=False)
                 self._send_consensus(proposal, accepted=True)
                 self.best_proposal = proposal
-                self.active_proposal_votes = set()
+                self.active_proposal_votes = {proposal.origin, self.node_id}
+                self._maybe_commit_active_proposal()
             else:
                 self._send_consensus(proposal, accepted=False)
             return
@@ -114,7 +115,8 @@ class EditConsensus:
         self._send_consensus(proposal, accepted=True)
         self.best_proposal = proposal
         self.active_proposal = True
-        self.active_proposal_votes = set()
+        self.active_proposal_votes = {proposal.origin, self.node_id}
+        self._maybe_commit_active_proposal()
 
     def _on_consensus(self, consensus: Consensus) -> Any | None:
         self.logger.debug(
@@ -145,9 +147,7 @@ class EditConsensus:
                 self._required_votes(),
                 self.best_proposal.tstamp,
             )
-            if len(self.active_proposal_votes) >= self._required_votes():
-                return self._apply_proposal(self.best_proposal)
-            return None
+            return self._maybe_commit_active_proposal()
 
         return self._reject_best_proposal()
 
@@ -155,7 +155,7 @@ class EditConsensus:
         return incoming.tstamp < current.tstamp
 
     def _required_votes(self) -> int:
-        return max(0, connection.number_of_peers())
+        return max(1, connection.number_of_peers() + 1)
 
     def _send_consensus(self, proposal: Proposal, accepted: bool) -> None:
         message = {
@@ -180,6 +180,18 @@ class EditConsensus:
         }
         self.logger.debug("Broadcast proposal tstamp=%d origin=%s", proposal.tstamp, proposal.origin)
         connection.send(json.dumps(message, ensure_ascii=False))
+
+    def _maybe_commit_active_proposal(self) -> Any | None:
+        required_votes = self._required_votes()
+        if len(self.active_proposal_votes) >= required_votes:
+            self.logger.debug(
+                "Committing proposal tstamp=%d votes=%d required=%d",
+                self.best_proposal.tstamp,
+                len(self.active_proposal_votes),
+                required_votes,
+            )
+            return self._apply_proposal(self.best_proposal)
+        return None
 
     def _apply_proposal(self, proposal: Proposal) -> Any | None:
         self.logger.info("Proposal committed tstamp=%d origin=%s", proposal.tstamp, proposal.origin)
@@ -216,12 +228,10 @@ class EditConsensus:
 
         self.best_proposal = proposal
         self.active_proposal = True
-        self.active_proposal_votes = set()
+        self.active_proposal_votes = {self.node_id}
         self.logger.info("Starting local proposal tstamp=%d", proposal.tstamp)
         self._send_proposal(proposal)
-
-        if self._required_votes() == 0:
-            self._apply_proposal(proposal)
+        self._maybe_commit_active_proposal()
 
 
 def _encode_for_network(message: Message) -> str:

@@ -102,6 +102,9 @@ class MyServer(BaseHTTPRequestHandler):
         self.send_header("Content-type", "text/html")
         self.end_headers()
 
+    def log_message(self, format, *args):
+        return
+
         
 def recv() -> str:
     """Funtion to recv data, if no data is recieved it waits untill it is.
