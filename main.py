@@ -7,10 +7,15 @@ from network.HTTP import connection as http_connection
 from plugin.extension_bridge import ExtensionBridge, Message
 
 
-def _configure_http_connection(host: str, port: int) -> None:
+def _configure_http_connection(host: str, port: int, public_url: str | None) -> None:
     http_connection.HOST_NAME = host
     http_connection.SERVER_PORT = port
-    http_connection.URL = f"http://{host}:{port}"
+    if public_url:
+        http_connection.URL = public_url.rstrip("/")
+    elif host in ("0.0.0.0", "::"):
+        http_connection.URL = f"http://127.0.0.1:{port}"
+    else:
+        http_connection.URL = f"http://{host}:{port}"
 
 
 def _encode_for_network(message: Message) -> str:
@@ -24,11 +29,17 @@ async def run_bridge(
     ws_port: int,
     http_host: str,
     http_port: int,
+    http_public_url: str | None,
     connect_peer: str | None,
     poll_interval: float,
 ) -> None:
-    _configure_http_connection(http_host, http_port)
-    http_connection.start_server(connect_peer=connect_peer, host=http_host, port=http_port)
+    _configure_http_connection(http_host, http_port, http_public_url)
+    http_connection.start_server(
+        connect_peer=connect_peer,
+        host=http_host,
+        port=http_port,
+        public_url=http_public_url,
+    )
 
     bridge = ExtensionBridge(host=ws_host, port=ws_port)
 
@@ -52,6 +63,8 @@ async def run_bridge(
         while True:
             incoming = http_connection.nrecv()
             if incoming is not None:
+                preview = incoming if len(incoming) <= 140 else (incoming[:137] + "...")
+                print(f"[http] inbound data={preview!r}")
                 await bridge.send({"type": "network_recv", "value": incoming})
             await asyncio.sleep(poll_interval)
     finally:
@@ -64,8 +77,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--ws-host", default="127.0.0.1", help="WebSocket host")
     parser.add_argument("--ws-port", type=int, default=42069, help="WebSocket port")
-    parser.add_argument("--http-host", default="127.0.0.1", help="HTTP peer host")
+    parser.add_argument("--http-host", default="0.0.0.0", help="HTTP peer host")
     parser.add_argument("--http-port", type=int, default=8080, help="HTTP peer port")
+    parser.add_argument(
+        "--http-public-url",
+        default=None,
+        help="Reachable URL advertised to peers (example: http://192.168.1.5:8080)",
+    )
     parser.add_argument(
         "--connect-peer",
         default=None,
@@ -89,6 +107,7 @@ def main() -> None:
                 ws_port=args.ws_port,
                 http_host=args.http_host,
                 http_port=args.http_port,
+                http_public_url=args.http_public_url,
                 connect_peer=args.connect_peer,
                 poll_interval=args.poll_interval,
             )
