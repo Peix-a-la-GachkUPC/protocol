@@ -128,6 +128,13 @@ class NetworkBroadcastTextOSNetwork:
                 agent = self._agents.get(to)
                 if agent is not None:
                     agent.dispatch(pmsg)
+                else:
+                    log.warning(
+                        "wire drop: unknown recipient to=%s (%s); local agents=%s",
+                        to,
+                        type(pmsg).__name__,
+                        sorted(self._agents.keys()),
+                    )
                 batch += 1
             if is_done_fn():
                 return

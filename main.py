@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from urllib.parse import urlparse
 from typing import Any
 
 from network import connection
@@ -62,6 +63,38 @@ def _membership_contains_local_roles(membership: dict[str, Any]) -> bool:
     return all(a in acceptors for a in local_acceptors) and all(
         l in learners for l in local_learners
     )
+
+
+def _is_loopback_endpoint(endpoint: str) -> bool:
+    host = urlparse(endpoint).hostname
+    return host in {"127.0.0.1", "localhost", "::1"}
+
+
+def _validate_membership(membership: dict[str, Any], *, self_endpoint: str) -> None:
+    acceptor_ids = list(membership.get("acceptor_ids", []))
+    learner_ids = list(membership.get("learner_ids", []))
+
+    if len(set(acceptor_ids)) != len(acceptor_ids):
+        raise RuntimeError(
+            "Duplicate acceptor IDs derived from cluster endpoints. "
+            "Set a stable unique conf.NETWORK_NODE_ID per node."
+        )
+    if len(set(learner_ids)) != len(learner_ids):
+        raise RuntimeError(
+            "Duplicate learner IDs derived from cluster endpoints. "
+            "Set a stable unique conf.NETWORK_NODE_ID per node."
+        )
+    if not _membership_contains_local_roles(membership):
+        raise RuntimeError(
+            "Local Paxos role IDs do not belong to cluster membership. "
+            "Set conf.NETWORK_NODE_ID to a stable public endpoint (for example "
+            "http://10.0.0.12:8080) so every node derives consistent IDs."
+        )
+    if len(acceptor_ids) > 1 and _is_loopback_endpoint(self_endpoint):
+        raise RuntimeError(
+            "Cluster has remote peers but local identity is loopback "
+            f"({self_endpoint}). Set conf.NETWORK_NODE_ID to your LAN/public URL."
+        )
 
 
 def _extension_value_payload(changes: list[dict[str, Any]]) -> dict[str, str]:
@@ -149,23 +182,27 @@ async def run_bridge(
     network_idle_loops: int,
     network_idle_sleep: float,
 ) -> None:
+    configured_node_id = getattr(conf, "NETWORK_NODE_ID", None)
+    if not isinstance(configured_node_id, str) or configured_node_id.strip() == "":
+        raise RuntimeError(
+            "conf.NETWORK_NODE_ID is required for distributed Paxos. "
+            "Set it to this node's stable endpoint, e.g. http://10.0.0.12:8080"
+        )
+
     connection.setup(network_protocol)
     connection.create(connect_peer)
 
     proposer_idle_sleep = network_idle_sleep if network_idle_sleep > 0 else 0.001
     bridge = ExtensionBridge(host=ws_host, port=ws_port)
     paxos_round_lock = asyncio.Lock()
+    self_endpoint = _normalize_endpoint(connection.self_url())
     membership = _derive_paxos_membership()
-    if not _membership_contains_local_roles(membership):
-        raise RuntimeError(
-            "Local Paxos role IDs do not belong to cluster membership. "
-            "Set conf.NETWORK_NODE_ID to a stable public endpoint (for example "
-            "http://10.0.0.12:8080) so every node derives consistent IDs."
-        )
+    _validate_membership(membership, self_endpoint=self_endpoint)
 
     async def _run_passive_acceptor_once() -> None:
         nonlocal membership
         membership = _derive_paxos_membership()
+        _validate_membership(membership, self_endpoint=self_endpoint)
         await asyncio.to_thread(
             prepare_and_acknowledge,
             ".__paxos_passive__.py",
@@ -177,7 +214,7 @@ async def run_bridge(
             local_learner_ids=[],
             start_proposer=False,
             use_network=True,
-            network_idle_loops=2,
+            network_idle_loops=max(50, network_idle_loops // 20),
             network_idle_sleep_s=0.0,
         )
 
@@ -192,6 +229,7 @@ async def run_bridge(
             async with paxos_round_lock:
                 nonlocal membership
                 membership = _derive_paxos_membership()
+                _validate_membership(membership, self_endpoint=self_endpoint)
                 row = await asyncio.to_thread(
                     prepare_and_acknowledge,
                     logical_file,
@@ -236,6 +274,7 @@ async def run_bridge(
                 preview = incoming if len(incoming) <= 140 else (incoming[:137] + "...")
                 print(f"[connection] inbound data={preview!r}")
                 membership = _derive_paxos_membership()
+                _validate_membership(membership, self_endpoint=self_endpoint)
                 commit = _decode_commit_payload(incoming)
                 if commit is not None:
                     _, changes = commit
@@ -325,7 +364,7 @@ def main() -> None:
                 ws_host=args.ws_host,
                 ws_port=args.ws_port,
                 network_protocol=args.network_protocol,
-                connect_peer=conf.HTTP_CONNECT_PEER,
+                connect_peer=args.connect_peer,
                 default_file=args.default_file,
                 poll_interval=args.poll_interval,
                 network_idle_loops=args.network_idle_loops,
