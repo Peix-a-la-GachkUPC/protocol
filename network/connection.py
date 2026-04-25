@@ -1,4 +1,5 @@
 import HTTP.connection
+import hyperswarm.connection
 
 PROTOCOL = ""
 
@@ -14,6 +15,8 @@ def recv() -> str:
     match (PROTOCOL):
         case ("HTTP"):
             return HTTP.connection.recv()
+        case ("hyperswarm"):
+            return hyperswarm.connection.recv()
         case (_):
             raise ValueError("Protocol desconegut")
 
@@ -29,6 +32,8 @@ def nrecv() -> str|None:
     match (PROTOCOL):
         case ("HTTP"):
             return HTTP.connection.nrecv()
+        case ("hyperswarm"):
+            return hyperswarm.connection.nrecv()
         case (_):
             raise ValueError("Protocol desconegut")
     
@@ -44,6 +49,8 @@ def send(data:str):
     match (PROTOCOL):
         case ("HTTP"):
             HTTP.connection.send(data)
+        case ("hyperswarm"):
+            hyperswarm.connection.send(data)
         case (_):
             raise ValueError("Protocol desconegut")
 
@@ -62,5 +69,7 @@ def create(protocol: str, discover_peer:str):
     match (PROTOCOL):
         case ("HTTP"):
             HTTP.connection.start_server(connect_peer=discover_peer)
+        case ("hyperswarm"):
+            hyperswarm.connection.create(discover_peer)
         case (_):
             raise ValueError("Protocol desconegut")
