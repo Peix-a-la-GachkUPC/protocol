@@ -7,7 +7,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from network import connection
 from plugin.extension_bridge import ExtensionBridge, Message
@@ -28,11 +28,17 @@ class Consensus:
 
 
 class EditConsensus:
-    def __init__(self, node_id: str, logger: logging.Logger) -> None:
+    def __init__(
+        self,
+        node_id: str,
+        logger: logging.Logger,
+        emit_to_bridge: Callable[[Any], None],
+    ) -> None:
         self.node_id = node_id
         self.logger = logger
+        self.emit_to_bridge = emit_to_bridge
         self.last_timestamp = 0
-        self.best_proposal = Proposal(tstamp=0, origin="", data={})
+        self.best_proposal: Proposal | None = None
         self.active_proposal = False
         self.active_proposal_votes: set[str] = set()
         self.pending_local_edits: deque[Any] = deque()
@@ -46,29 +52,33 @@ class EditConsensus:
         )
         self._try_start_next_local_proposal()
 
-    def on_network_raw(self, raw: str) -> Any | None:
+    def on_network_raw(self, raw: str) -> None:
         try:
             envelope = json.loads(raw)
         except json.JSONDecodeError:
-            return raw
+            self.emit_to_bridge(raw)
+            return
 
         if not isinstance(envelope, dict):
-            return raw
+            self.emit_to_bridge(raw)
+            return
 
         message_type = envelope.get("type")
         if message_type == "proposal":
             proposal = self._proposal_from_dict(envelope)
             if proposal is None:
-                return None
-            return self._on_proposal(proposal)
+                return
+            self._handle_proposal(proposal)
+            return
 
         if message_type == "consensus":
             consensus = self._consensus_from_dict(envelope)
             if consensus is None:
-                return None
-            return self._on_consensus(consensus)
+                return
+            self._handle_consensus(consensus)
+            return
 
-        return raw
+        self.emit_to_bridge(raw)
 
     def _proposal_from_dict(self, data: dict[str, Any]) -> Proposal | None:
         try:
@@ -90,46 +100,41 @@ class EditConsensus:
         except (KeyError, TypeError, ValueError):
             return None
 
-    def _on_proposal(self, proposal: Proposal) -> Any | None:
+    def _handle_proposal(self, proposal: Proposal) -> None:
         self.last_timestamp = max(self.last_timestamp, proposal.tstamp)
+        best_tstamp = self.best_proposal.tstamp if self.best_proposal is not None else 0
         self.logger.debug(
             "Received proposal tstamp=%d origin=%s active=%s best_tstamp=%d",
             proposal.tstamp,
             proposal.origin,
             self.active_proposal,
-            self.best_proposal.tstamp,
+            best_tstamp,
         )
 
-        if self.active_proposal:
-            if self._is_better(proposal, self.best_proposal):
-                if self.best_proposal.tstamp > 0:
-                    self._send_consensus(self.best_proposal, accepted=False)
-                self._send_consensus(proposal, accepted=True)
-                self.best_proposal = proposal
-                self.active_proposal_votes = {proposal.origin, self.node_id}
-                return self._maybe_commit_active_proposal()
-            else:
-                self._send_consensus(proposal, accepted=False)
-            return None
+        if not self.active_proposal or self.best_proposal is None:
+            self._accept_proposal(proposal)
+            self._try_commit_active_proposal()
+        elif self._is_better(proposal, self.best_proposal):
+            self._send_consensus(self.best_proposal, accepted=False)
+            self._accept_proposal(proposal)
+            self._try_commit_active_proposal()
+        else:
+            self._send_consensus(proposal, accepted=False)
 
-        self._send_consensus(proposal, accepted=True)
-        self.best_proposal = proposal
-        self.active_proposal = True
-        self.active_proposal_votes = {proposal.origin, self.node_id}
-        return self._maybe_commit_active_proposal()
-
-    def _on_consensus(self, consensus: Consensus) -> Any | None:
+    def _handle_consensus(self, consensus: Consensus) -> None:
+        best_tstamp = self.best_proposal.tstamp if self.best_proposal is not None else 0
         self.logger.debug(
             "Received consensus tstamp=%d voter=%s accepted=%s active=%s best_tstamp=%d",
             consensus.tstamp,
             consensus.voter,
             consensus.accepted,
             self.active_proposal,
-            self.best_proposal.tstamp,
+            best_tstamp,
         )
-        if not self.active_proposal:
+
+        if not self.active_proposal or self.best_proposal is None:
             self.logger.debug("Ignoring consensus because no active proposal")
-            return None
+            return
 
         if consensus.tstamp != self.best_proposal.tstamp:
             self.logger.debug(
@@ -137,7 +142,7 @@ class EditConsensus:
                 consensus.tstamp,
                 self.best_proposal.tstamp,
             )
-            return None
+            return
 
         if consensus.accepted:
             self.active_proposal_votes.add(consensus.voter)
@@ -147,9 +152,15 @@ class EditConsensus:
                 self._required_votes(),
                 self.best_proposal.tstamp,
             )
-            return self._maybe_commit_active_proposal()
+            self._try_commit_active_proposal()
+        else:
+            self._reject_best_proposal()
 
-        return self._reject_best_proposal()
+    def _accept_proposal(self, proposal: Proposal) -> None:
+        self._send_consensus(proposal, accepted=True)
+        self.best_proposal = proposal
+        self.active_proposal = True
+        self.active_proposal_votes = {proposal.origin, self.node_id}
 
     def _is_better(self, incoming: Proposal, current: Proposal) -> bool:
         return incoming.tstamp < current.tstamp
@@ -181,7 +192,10 @@ class EditConsensus:
         self.logger.debug("Broadcast proposal tstamp=%d origin=%s", proposal.tstamp, proposal.origin)
         connection.send(json.dumps(message, ensure_ascii=False))
 
-    def _maybe_commit_active_proposal(self) -> Any | None:
+    def _try_commit_active_proposal(self) -> None:
+        if not self.active_proposal or self.best_proposal is None:
+            return
+
         required_votes = self._required_votes()
         if len(self.active_proposal_votes) >= required_votes:
             self.logger.debug(
@@ -190,34 +204,37 @@ class EditConsensus:
                 len(self.active_proposal_votes),
                 required_votes,
             )
-            return self._apply_proposal(self.best_proposal)
-        return None
+            self._apply_proposal(self.best_proposal)
 
     def _next_timestamp(self) -> int:
         now_ns = time.time_ns()
         self.last_timestamp = max(self.last_timestamp + 1, now_ns)
         return self.last_timestamp
 
-    def _apply_proposal(self, proposal: Proposal) -> Any | None:
+    def _apply_proposal(self, proposal: Proposal) -> None:
         self.logger.info("Proposal committed tstamp=%d origin=%s", proposal.tstamp, proposal.origin)
         self.active_proposal = False
+        self.best_proposal = None
         self.active_proposal_votes = set()
 
-        committed = proposal.data if proposal.origin != self.node_id else None
+        if proposal.origin != self.node_id:
+            self.emit_to_bridge(proposal.data)
         self._try_start_next_local_proposal()
-        return committed
 
-    def _reject_best_proposal(self) -> Any | None:
+    def _reject_best_proposal(self) -> None:
+        if self.best_proposal is None:
+            return
+
         rejected = self.best_proposal
         self.logger.info("Proposal rejected tstamp=%d origin=%s", rejected.tstamp, rejected.origin)
         self.active_proposal = False
+        self.best_proposal = None
         self.active_proposal_votes = set()
 
         if rejected.origin == self.node_id:
             self.pending_local_edits.appendleft(rejected.data)
 
         self._try_start_next_local_proposal()
-        return None
 
     def _try_start_next_local_proposal(self) -> None:
         if self.active_proposal or not self.pending_local_edits:
@@ -235,7 +252,7 @@ class EditConsensus:
         self.active_proposal_votes = {self.node_id}
         self.logger.info("Starting local proposal tstamp=%d", proposal.tstamp)
         self._send_proposal(proposal)
-        self._maybe_commit_active_proposal()
+        self._try_commit_active_proposal()
 
 
 def _encode_for_network(message: Message) -> str:
@@ -308,9 +325,17 @@ async def run_bridge(
 ) -> None:
     connection.setup("HTTP", host=http_host, port=http_port)
     connection.create(connect_peer)
-    consensus = EditConsensus(node_id=node_id, logger=logger)
 
     bridge = ExtensionBridge(host=ws_host, port=ws_port)
+
+    async def send_network_recv(payload: Any) -> None:
+        logger.info("Applying remote edit to extension")
+        await bridge.send({"type": "network_recv", "value": _encode_for_network(payload)})
+
+    def emit_to_bridge(payload: Any) -> None:
+        asyncio.create_task(send_network_recv(payload))
+
+    consensus = EditConsensus(node_id=node_id, logger=logger, emit_to_bridge=emit_to_bridge)
 
     async def on_extension_message(message: Message) -> None:
         if isinstance(message, dict) and "value" in message:
@@ -331,10 +356,7 @@ async def run_bridge(
         while True:
             incoming = connection.nrecv()
             if incoming is not None:
-                applied = consensus.on_network_raw(incoming)
-                if applied is not None:
-                    logger.info("Applying remote edit to extension")
-                    await bridge.send({"type": "network_recv", "value": _encode_for_network(applied)})
+                consensus.on_network_raw(incoming)
             await asyncio.sleep(poll_interval)
     finally:
         await bridge.stop()
