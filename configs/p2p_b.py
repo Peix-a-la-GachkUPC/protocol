@@ -1,0 +1,14 @@
+WS_HOST = "127.0.0.1"
+WS_PORT = 42070
+
+NETWORK_CONNECT_PEER = "topicforhackupc22"
+NETWORK_NODE_ID = "alias2"
+
+HTTP_HOST = "0.0.0.0"
+HTTP_PORT = 8081
+
+POLL_INTERVAL = 0.05
+
+PROTOCOL_DEBUG = True
+
+PROTOCOL = "hyperswarm"

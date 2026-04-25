@@ -5,7 +5,7 @@ import threading
 
 
 class HyperswarmInterface:
-    def __init__(self, node_path='index.js', cwd=None):
+    def __init__(self, node_path='network/hyperswarm/index.js', cwd=None):
         self.node_path = node_path
         self.cwd = cwd or os.getcwd()
         self.proc = subprocess.Popen(
@@ -85,6 +85,7 @@ class HyperswarmInterface:
             try:
                 line = self.proc.stderr.readline()
                 if line:
+                    print(line)
                     event = json.loads(line.strip())
                     with self._events_lock:
                         self._events.append(event)

@@ -8,3 +8,5 @@ POLL_INTERVAL = 0.05
 
 # Set to True to enable verbose proposal/consensus logs.
 PROTOCOL_DEBUG = False
+
+PROTOCOL = "HTTP"
