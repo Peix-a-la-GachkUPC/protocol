@@ -179,6 +179,12 @@ def prepare_and_acknowledge(
     file: str,
     changes: list[dict],
     *,
+    proposer_id: str = "p1",
+    acceptor_ids: list[str] | None = None,
+    learner_ids: list[str] | None = None,
+    local_acceptor_ids: list[str] | None = None,
+    local_learner_ids: list[str] | None = None,
+    start_proposer: bool = True,
     use_network: bool = False,
     network_idle_loops: int = 10_000,
     network_idle_sleep_s: float = 0.0,
@@ -196,12 +202,25 @@ def prepare_and_acknowledge(
     value expected by the transport, start the server, and establish peers) so that
     ``send`` and ``nrecv`` are operational before calling this. For a purely local
     in-process run, leave ``use_network`` False.
+
+    For one-role-per-host P2P deployments:
+
+    * Configure the full cluster with ``acceptor_ids`` / ``learner_ids``.
+    * Set ``local_acceptor_ids`` / ``local_learner_ids`` to roles hosted in this
+      process.
+    * On proposer host call with ``start_proposer=True``; on passive hosts call
+      with ``start_proposer=False`` to only pump inbound/outbound Paxos traffic.
     """
     data_actual = load_TextOS(file)
-    n = _next_ballot(file, data_actual)
-    proposal = Proposal(n, changes)
-    acceptor_ids = ["a1", "a2", "a3"]
-    learner_ids = ["l1"]
+    if acceptor_ids is None:
+        acceptor_ids = ["a1", "a2", "a3"]
+    if learner_ids is None:
+        learner_ids = ["l1"]
+
+    proposal = None
+    if start_proposer:
+        n = _next_ballot(file, data_actual)
+        proposal = Proposal(n, changes)
     config = TextOSConfig(acceptor_ids, learner_ids)
 
     row = None
@@ -212,7 +231,7 @@ def prepare_and_acknowledge(
 
     run_synod(
         config,
-        "p1",
+        proposer_id,
         proposal,
         acceptor_ids,
         learner_ids,
@@ -220,8 +239,13 @@ def prepare_and_acknowledge(
         use_network=use_network,
         network_idle_loops=network_idle_loops,
         network_idle_sleep_s=network_idle_sleep_s,
+        local_acceptor_ids=local_acceptor_ids,
+        local_learner_ids=local_learner_ids,
+        start_proposer=start_proposer,
     )
     if row is not None:
-        data_actual.append(row)
-        save_TextOS(file, data_actual)
+        already_seen = any(int(r.get("N", 0) or 0) == int(row["N"]) for r in data_actual)
+        if not already_seen:
+            data_actual.append(row)
+            save_TextOS(file, data_actual)
     return row
