@@ -56,6 +56,7 @@ class NetworkBroadcastTextOSNetwork:
     def __init__(self):
         self._agents = {}
         self._nc = None
+        self._local_queue = deque()
 
     @property
     def nc(self):
@@ -69,8 +70,22 @@ class NetworkBroadcastTextOSNetwork:
 
     def enqueue(self, targets, msg):
         for t in targets:
+            local_agent = self._agents.get(t)
+            if local_agent is not None:
+                self._local_queue.append((t, msg))
+                continue
             payload = encode_envelope(t, msg)
             self.nc.send(payload)
+
+    def _drain_local(self) -> int:
+        processed = 0
+        while self._local_queue:
+            pid, msg = self._local_queue.popleft()
+            agent = self._agents.get(pid)
+            if agent is not None:
+                agent.dispatch(msg)
+                processed += 1
+        return processed
 
     def drain_quiescent(
         self,
@@ -86,7 +101,9 @@ class NetworkBroadcastTextOSNetwork:
         """
         idle = 0
         while not is_done_fn() and idle < max_idle_loops:
-            batch = 0
+            batch = self._drain_local()
+            if is_done_fn():
+                return
             while True:
                 s = self.nc.nrecv()
                 if s is None:
@@ -189,6 +206,9 @@ def run_synod(
     use_network: bool = False,
     network_idle_loops: int = 10_000,
     network_idle_sleep_s: float = 0.0,
+    local_acceptor_ids: list[str] | None = None,
+    local_learner_ids: list[str] | None = None,
+    start_proposer: bool = True,
 ):
     """
     One instance: one proposer, acceptors, learners. Blocks until quiescent.
@@ -200,6 +220,15 @@ def run_synod(
       commits (``on_learned``) or the poll budget is exhausted. The application must
       have configured ``network.connection`` (e.g. ``PROTOCOL`` and server) for
       the transport to work.
+
+    Distributed mode knobs (for one-role-per-host deployment):
+
+    * ``local_acceptor_ids``: subset of ``acceptor_ids`` instantiated in *this*
+      process (default: all).
+    * ``local_learner_ids``: subset of ``learner_ids`` instantiated in *this*
+      process (default: all).
+    * ``start_proposer=False``: do not instantiate/send from proposer; the node
+      behaves as a passive acceptor/learner pump for this call.
     """
     if use_network:
         net: LocalTextOSNetwork | NetworkBroadcastTextOSNetwork = (
@@ -216,17 +245,32 @@ def run_synod(
         learned_box.append(msg.proposal.value)
         learned_flag[0] = True
 
-    for aid in acceptor_ids:
-        net.register(TextOSAgent(aid, config, role="acceptor"))
-    for lid in learner_ids:
-        net.register(TextOSAgent(lid, config, role="learner", on_learned=_cb))
-    proposer = TextOSAgent(proposer_pid, config, role="proposer", proposal=proposal)
-    net.register(proposer)
-    proposer.proposer.handle_client_request(proposal)
+    run_acceptor_ids = (
+        acceptor_ids if local_acceptor_ids is None else list(local_acceptor_ids)
+    )
+    run_learner_ids = (
+        learner_ids if local_learner_ids is None else list(local_learner_ids)
+    )
+
+    for aid in run_acceptor_ids:
+        if aid in config.acceptor_ids:
+            net.register(TextOSAgent(aid, config, role="acceptor"))
+    for lid in run_learner_ids:
+        if lid in config.learner_ids:
+            net.register(TextOSAgent(lid, config, role="learner", on_learned=_cb))
+
+    if start_proposer:
+        if proposer_pid is None:
+            raise ValueError("proposer_pid is required when start_proposer=True")
+        if proposal is None:
+            raise ValueError("proposal is required when start_proposer=True")
+        proposer = TextOSAgent(proposer_pid, config, role="proposer", proposal=proposal)
+        net.register(proposer)
+        proposer.proposer.handle_client_request(proposal)
     if use_network:
         assert isinstance(net, NetworkBroadcastTextOSNetwork)
         net.drain_quiescent(
-            lambda: learned_flag[0],
+            (lambda: learned_flag[0]) if start_proposer else (lambda: False),
             max_idle_loops=network_idle_loops,
             idle_sleep_s=network_idle_sleep_s,
         )

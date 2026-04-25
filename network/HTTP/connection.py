@@ -76,7 +76,7 @@ class MyServer(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
-        peer_list.append(args["url"])
+        peer_list.append(args["url"][0])
 
         self.send_response(200)
         self.send_header("Content-type", "text/html")
@@ -149,7 +149,7 @@ def create_connections(connect_peer:str):
         r = requests.get(url = f"{peer_url}/connect?url={URL}")
 
 
-def start_server(connect_peer:str=None, host:str=HOST_NAME, port:int=SERVER_PORT):
+def start_server(connect_peer: str | None = None, host: str | None = None, port: int | None = None):
     """Starts the server
 
     Args:
@@ -157,10 +157,15 @@ def start_server(connect_peer:str=None, host:str=HOST_NAME, port:int=SERVER_PORT
         host (str, optional): local hostname. Defaults to HOST_NAME.
         port (int, optional): local port. Defaults to SERVER_PORT.
     """
+    if host is None:
+        host = HOST_NAME
+    if port is None:
+        port = SERVER_PORT
     if not connect_peer == None:
         create_connections(connect_peer)
 
     t = Thread(target=server_loop, args=(host, port,))
+    t.daemon = True
     t.start()
 
 if __name__ == "__main__":

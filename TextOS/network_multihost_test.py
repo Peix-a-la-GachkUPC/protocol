@@ -32,9 +32,12 @@ import time
 import urllib.parse
 from pathlib import Path
 
-# ``HTTP`` lives under network/; ensure it is importable (same as network.connection).
+# Repo root: ``import network``; under ``network/``: ``import HTTP`` (used by
+# ``network.connection``).
 _root = Path(__file__).resolve().parents[1]
 _net_root = _root / "network"
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
 if str(_net_root) not in sys.path:
     sys.path.insert(0, str(_net_root))
 
@@ -59,8 +62,8 @@ def _include_self_in_peers(public_base: str) -> None:
 
 def _patch_network_send() -> None:
     """
-    ``network.connection.send`` (library bug) points at ``HTTP.connection.recv``; rewire
-    to real ``HTTP.connection.send`` so this harness can run without editing ``network/``.
+    Ensure outbound traffic uses ``HTTP.connection.send``; keeps the harness working if
+    an older ``network.connection.send`` is loaded.
     """
     import HTTP.connection as h  # type: ignore[import-not-found, import-untyped]
     import network.connection as nc  # type: ignore[import-not-found, import-untyped]
@@ -79,7 +82,7 @@ def _start_stack(discover: str | None) -> None:
     _patch_network_send()
     nc.PROTOCOL = "HTTP"
     if discover is not None:
-        nc.create(discover)
+        nc.create("HTTP", discover)
     else:
         import HTTP.connection as h  # type: ignore[import-not-found, import-untyped]
 
