@@ -92,7 +92,7 @@ class MyServer(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
-        _add_peer(f"http://{self.client_address[0]}:{self.client_address[1]}")
+        _add_peer(f"http://{self.client_address[0]}:{args["url"][0].split(":")[-1]}")
 
         self.send_response(200)
         self.send_header("Content-type", "text/html")
