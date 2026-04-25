@@ -138,4 +138,4 @@ def peers() -> list[str]:
 
 
 def requeue(data: str) -> None:
-    _requeue_buffer.insert(0, data)
+    _requeue_buffer.append(data)

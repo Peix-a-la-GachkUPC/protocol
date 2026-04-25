@@ -116,7 +116,7 @@ def recv() -> str:
     """
     global recv_list
     while len(recv_list) == 0: pass
-    return recv_list.pop()
+    return recv_list.pop(0)
 
 def nrecv() -> str|None:
     """Funtion to recv data, if no data is recived it returns null
@@ -127,7 +127,7 @@ def nrecv() -> str|None:
     global recv_list
     if len(recv_list) == 0: 
         return None
-    return recv_list.pop()
+    return recv_list.pop(0)
 
 def send(value:str):
     """Function to send data
