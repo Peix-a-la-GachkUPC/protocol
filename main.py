@@ -1,8 +1,10 @@
 import argparse
 import asyncio
+import copy
 import hashlib
 import json
 import logging
+from collections import deque
 from urllib.parse import urlparse
 from typing import Any
 
@@ -15,6 +17,141 @@ try:
     import conf
 except ImportError as exc:
     raise ImportError("Copy conf.py.example to conf.py and configure it") from exc
+
+
+Operation = dict[str, Any]
+
+
+def _ot_insert_insert(op1: Operation, op2: Operation) -> tuple[Operation, Operation]:
+    i1, i2 = op1.get("index", 0), op2.get("index", 0)
+    t1, t2 = op1.get("add", ""), op2.get("add", "")
+    if "add" not in op1 or "add" not in op2:
+        return op1, op2
+    if i1 < i2 or (i1 == i2 and len(t1) <= len(t2)):
+        new_op1 = copy.deepcopy(op1)
+        new_op2 = copy.deepcopy(op2)
+        new_op2["index"] = i2 + len(t1)
+        return new_op1, new_op2
+    else:
+        new_op1 = copy.deepcopy(op1)
+        new_op2 = copy.deepcopy(op2)
+        new_op1["index"] = i1 + len(t2)
+        return new_op1, new_op2
+
+
+def _ot_insert_delete(op_insert: Operation, op_delete: Operation) -> tuple[Operation, Operation]:
+    i_ins = op_insert.get("index", 0)
+    i_del = op_delete.get("index", 0)
+    len_del = op_delete.get("del", 0)
+    text_ins = op_insert.get("add", "")
+
+    if "del" not in op_delete:
+        return op_insert, op_delete
+    if "add" not in op_insert:
+        new_insert = copy.deepcopy(op_insert)
+        new_delete = copy.deepcopy(op_delete)
+        return new_insert, new_delete
+
+    if i_ins >= i_del + len_del:
+        new_insert = copy.deepcopy(op_insert)
+        new_delete = copy.deepcopy(op_delete)
+        return new_insert, new_delete
+    elif i_ins <= i_del:
+        new_insert = copy.deepcopy(op_insert)
+        new_delete = copy.deepcopy(op_delete)
+        new_delete["index"] = i_del + len(text_ins)
+        return new_insert, new_delete
+    else:
+        new_insert = copy.deepcopy(op_insert)
+        new_delete = copy.deepcopy(op_delete)
+        new_insert["index"] = i_del
+        new_delete_len = i_ins - i_del
+        new_delete = {"index": i_del, "del": new_delete_len}
+        remainder = {"index": i_del + new_delete_len, "del": len_del - new_delete_len - len(text_ins)}
+        return new_insert, new_delete
+
+
+def _ot_delete_insert(op_delete: Operation, op_insert: Operation) -> tuple[Operation, Operation]:
+    i_del = op_delete.get("index", 0)
+    len_del = op_delete.get("del", 0)
+    i_ins = op_insert.get("index", 0)
+    text_ins = op_insert.get("add", "")
+
+    if "del" not in op_delete:
+        return op_delete, op_insert
+    if "add" not in op_insert:
+        new_delete = copy.deepcopy(op_delete)
+        new_insert = copy.deepcopy(op_insert)
+        return new_delete, new_insert
+
+    if i_ins >= i_del + len_del:
+        new_delete = copy.deepcopy(op_delete)
+        new_insert = copy.deepcopy(op_insert)
+        new_insert["index"] = i_ins - len_del
+        return new_delete, new_insert
+    elif i_ins <= i_del:
+        new_delete = copy.deepcopy(op_delete)
+        new_insert = copy.deepcopy(op_insert)
+        new_delete["index"] = i_del + len(text_ins)
+        return new_delete, new_insert
+    else:
+        new_insert = copy.deepcopy(op_insert)
+        new_delete = copy.deepcopy(op_delete)
+        shift = len(text_ins) - (i_ins - i_del)
+        new_delete["del"] = len_del - shift
+        new_delete["index"] = i_del
+        return new_delete, new_insert
+
+
+def _ot_delete_delete(op1: Operation, op2: Operation) -> tuple[Operation, Operation]:
+    i1, i2 = op1.get("index", 0), op2.get("index", 0)
+    d1, d2 = op1.get("del", 0), op2.get("del", 0)
+
+    if "del" not in op1 or "del" not in op2:
+        return op1, op2
+
+    if i1 + d1 <= i2:
+        new_op1 = copy.deepcopy(op1)
+        new_op2 = copy.deepcopy(op2)
+        new_op2["index"] = i2 - d1
+        return new_op1, new_op2
+    elif i2 + d2 <= i1:
+        new_op1 = copy.deepcopy(op1)
+        new_op2 = copy.deepcopy(op2)
+        new_op1["index"] = i1 - d2
+        return new_op1, new_op2
+    elif i1 < i2:
+        new_op1 = copy.deepcopy(op1)
+        new_op2 = copy.deepcopy(op2)
+        overlap = min(d1, i2 - i1)
+        new_op1["del"] = d1 - overlap
+        new_op2["index"] = i1
+        new_op2["del"] = d2 - (d1 - overlap)
+        return new_op1, new_op2
+    else:
+        new_op1 = copy.deepcopy(op1)
+        new_op2 = copy.deepcopy(op2)
+        overlap = min(d2, i1 - i2)
+        new_op2["del"] = d2 - overlap
+        new_op1["index"] = i2
+        new_op1["del"] = d1 - (d2 - overlap)
+        return new_op1, new_op2
+
+
+def transform_operation(op1: Operation, op2: Operation) -> tuple[Operation, Operation]:
+    has_ins1, has_ins2 = "add" in op1, "add" in op2
+    has_del1, has_del2 = "del" in op1, "del" in op2
+
+    if has_ins1 and has_ins2:
+        return _ot_insert_insert(op1, op2)
+    elif has_ins1 and has_del2:
+        return _ot_insert_delete(op1, op2)
+    elif has_del1 and has_ins2:
+        return _ot_delete_insert(op1, op2)
+    elif has_del1 and has_del2:
+        return _ot_delete_delete(op1, op2)
+    else:
+        return op1, op2
 
 
 def _normalize_endpoint(raw: str) -> str:
@@ -199,6 +336,65 @@ async def run_bridge(
     membership = _derive_paxos_membership()
     _validate_membership(membership, self_endpoint=self_endpoint)
 
+    _pending_ops_buffer: deque[Operation] = deque()
+    _pending_ops_lock = asyncio.Lock()
+    _pending_flush_timer: float = 0.0
+    _pending_flush_interval: float = 0.15
+    _last_sent_n: int = 0
+
+    async def _flush_pending_ops(force: bool = False) -> list[Operation]:
+        global _pending_flush_timer, _last_sent_n
+        async with _pending_ops_lock:
+            ops = list(_pending_ops_buffer)
+            if force or ops:
+                _pending_ops_buffer.clear()
+                _pending_flush_timer = 0.0
+        return ops
+
+    async def _clear_pending_on_success(ballot_n: int) -> None:
+        global _last_sent_n
+        async with _pending_ops_lock:
+            if ballot_n > _last_sent_n:
+                _pending_ops_buffer.clear()
+                _last_sent_n = ballot_n
+
+    async def _add_to_pending_buffer(changes: list[Operation]) -> None:
+        global _pending_flush_timer
+        async with _pending_ops_lock:
+            for change in changes:
+                if change.get("add") or change.get("del"):
+                    _pending_ops_buffer.append(change)
+            _pending_flush_timer = _pending_flush_interval
+
+    async def _force_flush_and_send(commit_msg: str, logical_file: str) -> None:
+        ops = await _flush_pending_ops(force=True)
+        if not ops:
+            return
+        await asyncio.to_thread(
+            prepare_and_acknowledge,
+            logical_file,
+            ops,
+            proposer_id=membership["proposer_id"],
+            acceptor_ids=membership["acceptor_ids"],
+            learner_ids=membership["learner_ids"],
+            local_acceptor_ids=membership["local_acceptor_ids"],
+            local_learner_ids=membership["local_learner_ids"],
+            use_network=True,
+            network_idle_loops=network_idle_loops,
+            network_idle_sleep_s=proposer_idle_sleep,
+        )
+
+    async def _apply_transformed_ops(changes: list[Operation]) -> list[Operation]:
+        async with _pending_ops_lock:
+            remote_ops = copy.deepcopy(changes)
+            for local_op in _pending_ops_buffer:
+                transformed_remote = []
+                for remote_op in remote_ops:
+                    local_op, remote_op = transform_operation(local_op, remote_op)
+                    transformed_remote.append(remote_op)
+                remote_ops = transformed_remote
+        return remote_ops
+
     async def _run_passive_acceptor_once() -> None:
         nonlocal membership
         membership = _derive_paxos_membership()
@@ -211,7 +407,7 @@ async def run_bridge(
             acceptor_ids=membership["acceptor_ids"],
             learner_ids=membership["learner_ids"],
             local_acceptor_ids=membership["local_acceptor_ids"],
-            local_learner_ids=[],
+            local_learner_ids=membership["local_learner_ids"],
             start_proposer=False,
             use_network=True,
             network_idle_loops=max(50, network_idle_loops // 20),
@@ -227,13 +423,20 @@ async def run_bridge(
 
         try:
             async with paxos_round_lock:
+                await _add_to_pending_buffer(changes)
+                await asyncio.sleep(_pending_flush_interval)
+                ops_to_send = await _flush_pending_ops()
+                
+                if not ops_to_send:
+                    return
+
                 nonlocal membership
                 membership = _derive_paxos_membership()
                 _validate_membership(membership, self_endpoint=self_endpoint)
                 row = await asyncio.to_thread(
                     prepare_and_acknowledge,
                     logical_file,
-                    changes,
+                    ops_to_send,
                     proposer_id=membership["proposer_id"],
                     acceptor_ids=membership["acceptor_ids"],
                     learner_ids=membership["learner_ids"],
@@ -244,6 +447,7 @@ async def run_bridge(
                     network_idle_sleep_s=proposer_idle_sleep,
                 )
             if row is not None:
+                await _clear_pending_on_success(int(row.get("N", 0)))
                 commit = json.dumps(
                     {
                         "kind": "textos_commit",
@@ -278,12 +482,15 @@ async def run_bridge(
                 commit = _decode_commit_payload(incoming)
                 if commit is not None:
                     _, changes = commit
-                    await bridge.send(_extension_value_payload(changes))
+                    transformed = await _apply_transformed_ops(changes)
+                    await bridge.send(_extension_value_payload(transformed))
+                    await _flush_pending_ops(force=True)
                 elif _is_paxos_wire(incoming):
                     connection.requeue(incoming)
                     await _run_passive_acceptor_once()
             await asyncio.sleep(poll_interval)
     finally:
+        await _flush_pending_ops(force=True)
         await bridge.stop()
 
 
