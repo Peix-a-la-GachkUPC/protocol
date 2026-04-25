@@ -86,13 +86,13 @@ class MyServer(BaseHTTPRequestHandler):
             args (dict[str, str]): arguments (url)
         """
         global peer_list
-        if not "url" in args.keys():
+        if not "port" in args.keys():
             self.send_response(400)
             self.send_header("Content-type", "text/html")
             self.end_headers()
             return
 
-        _add_peer(f"http://{self.client_address[0]}:{args["url"][0].split(":")[-1]}")
+        _add_peer(f"http://{self.client_address[0]}:{args["port"][0]}")
 
         self.send_response(200)
         self.send_header("Content-type", "text/html")
@@ -150,7 +150,7 @@ def server_loop(host:str, port:int):
     webServer.server_close()
     print("Server stopped.")
 
-def create_connections(connect_peer:str):
+def create_connections(connect_peer:str, port):
     """Creates the connections by asking the connecte peer for all the known peers
     then connects to all those peers
 
@@ -166,7 +166,7 @@ def create_connections(connect_peer:str):
     print(peer_list, type(peer_list))
     _add_peer(connect_peer)
     for peer_url in peer_list:
-        r = requests.get(url = f"{peer_url}/connect?url={URL}")
+        r = requests.get(url = f"{peer_url}/connect?port={port}")
 
 def start_server(
     connect_peer: str | None = None,
@@ -195,7 +195,7 @@ def start_server(
         URL = f"http://{host}:{port}"
 
     if not connect_peer == None:
-        create_connections(connect_peer)
+        create_connections(connect_peer, port)
 
     t = Thread(target=server_loop, args=(host, port,))
     t.daemon = True
