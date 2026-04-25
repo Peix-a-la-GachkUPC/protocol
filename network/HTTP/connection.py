@@ -33,6 +33,9 @@ def setup():
     HOST_NAME = conf.HTTP_HOST
     SERVER_PORT = conf.HTTP_PORT
 
+def number_of_peers() -> int:
+    return len(peer_list)
+
 
 class MyServer(BaseHTTPRequestHandler):
     def do_GET(self):

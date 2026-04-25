@@ -55,6 +55,15 @@ def send(data:str):
         case (_):
             raise ValueError("Protocol desconegut")
 
+def number_of_peers() -> int:
+    match(PROTOCOL):
+        case ("HTTP"):
+            http_connection.number_of_peers(data)
+        case ("hyperswarm"):
+            hyperswarm_connection.number_of_peers(data)
+        case (_):
+            raise ValueError("Protocol desconegut")
+
 def setup(protocol:str):
     global PROTOCOL
     PROTOCOL = protocol

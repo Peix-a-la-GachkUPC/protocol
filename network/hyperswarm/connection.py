@@ -13,3 +13,6 @@ def recv():
 
 def nrecv():
     return hs.nrecv()
+
+def number_of_peers() -> int:
+    return hs.peer_count()
