@@ -62,6 +62,36 @@ def _run_join_serve(port: int, discover: str) -> None:
     time.sleep(10_000)
 
 
+def _run_bootstrap_recv_once(port: int) -> None:
+    """Peer A: bootstrap and block until one message is received."""
+    _ensure_net_imports()
+    import HTTP.connection as h
+    import network.connection as nc
+
+    h.URL = f"http://127.0.0.1:{port}"
+    h.SERVER_PORT = port
+    h.HOST_NAME = "0.0.0.0"
+    nc.PROTOCOL = "HTTP"
+    h.start_server(connect_peer=None, host=h.HOST_NAME, port=h.SERVER_PORT)
+    msg = nc.recv()
+    print(msg, flush=True)
+
+
+def _run_join_send_once(port: int, discover: str, payload: str) -> None:
+    """Peer B: join A, send one payload over network.connection.send, then exit."""
+    _ensure_net_imports()
+    import HTTP.connection as h
+    import network.connection as nc
+
+    h.URL = f"http://127.0.0.1:{port}"
+    h.SERVER_PORT = port
+    h.HOST_NAME = "0.0.0.0"
+    nc.create("HTTP", discover.rstrip("/"))
+    time.sleep(0.4)
+    nc.send(payload)
+    time.sleep(0.2)
+
+
 def _free_port() -> int:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.bind(("127.0.0.1", 0))
@@ -150,6 +180,158 @@ class TestMultihostMesh(unittest.TestCase):
             except subprocess.TimeoutExpired:
                 proc_a.kill()
 
+    def test_three_processes_peer_list_full_mesh(self) -> None:
+        """
+        A bootstrap, B joins A, C joins A. All nodes should end with full mesh peers.
+        """
+        import requests
+
+        pa = _free_port()
+        pb = _free_port()
+        pc = _free_port()
+        used = {pa}
+        while pb in used:
+            pb = _free_port()
+        used.add(pb)
+        while pc in used:
+            pc = _free_port()
+
+        root = _repo_root()
+        script = str(Path(__file__).resolve())
+        env = _sub_env()
+
+        proc_a = subprocess.Popen(
+            [sys.executable, script, "bootstrap", str(pa)],
+            cwd=root,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        proc_b = None
+        proc_c = None
+        try:
+            time.sleep(0.5)
+            proc_b = subprocess.Popen(
+                [
+                    sys.executable,
+                    script,
+                    "join-serve",
+                    str(pb),
+                    f"http://127.0.0.1:{pa}",
+                ],
+                cwd=root,
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            time.sleep(0.5)
+            proc_c = subprocess.Popen(
+                [
+                    sys.executable,
+                    script,
+                    "join-serve",
+                    str(pc),
+                    f"http://127.0.0.1:{pa}",
+                ],
+                cwd=root,
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            time.sleep(1.2)
+
+            a_url = f"http://127.0.0.1:{pa}"
+            b_url = f"http://127.0.0.1:{pb}"
+            c_url = f"http://127.0.0.1:{pc}"
+
+            a_peers = requests.get(f"{a_url}/get_peers", timeout=5).json()
+            b_peers = requests.get(f"{b_url}/get_peers", timeout=5).json()
+            c_peers = requests.get(f"{c_url}/get_peers", timeout=5).json()
+
+            self.assertIn(b_url, a_peers, f"A should know B, got {a_peers!r}")
+            self.assertIn(c_url, a_peers, f"A should know C, got {a_peers!r}")
+            self.assertIn(a_url, b_peers, f"B should know A, got {b_peers!r}")
+            self.assertIn(c_url, b_peers, f"B should know C, got {b_peers!r}")
+            self.assertIn(a_url, c_peers, f"C should know A, got {c_peers!r}")
+            self.assertIn(b_url, c_peers, f"C should know B, got {c_peers!r}")
+        finally:
+            if proc_c is not None and proc_c.poll() is None:
+                proc_c.terminate()
+                try:
+                    proc_c.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc_c.kill()
+            if proc_b is not None and proc_b.poll() is None:
+                proc_b.terminate()
+                try:
+                    proc_b.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc_b.kill()
+            proc_a.terminate()
+            try:
+                proc_a.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc_a.kill()
+
+    def test_connection_send_delivers_payload_to_peer(self) -> None:
+        """
+        Validate network.connection.send -> HTTP /data delivery across two processes.
+        """
+        pa = _free_port()
+        pb = _free_port()
+        if pa == pb:
+            pb = _free_port()
+
+        payload = "hello-from-send"
+        root = _repo_root()
+        script = str(Path(__file__).resolve())
+        env = _sub_env()
+
+        proc_a = subprocess.Popen(
+            [sys.executable, script, "bootstrap-recv-once", str(pa)],
+            cwd=root,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        proc_b = None
+        try:
+            time.sleep(0.6)
+            proc_b = subprocess.Popen(
+                [
+                    sys.executable,
+                    script,
+                    "join-send-once",
+                    str(pb),
+                    f"http://127.0.0.1:{pa}",
+                    payload,
+                ],
+                cwd=root,
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            proc_b.wait(timeout=10)
+            self.assertEqual(proc_b.returncode, 0)
+
+            out_a, err_a = proc_a.communicate(timeout=10)
+            self.assertEqual(proc_a.returncode, 0, msg=err_a)
+            self.assertIn(payload, out_a)
+        finally:
+            if proc_b is not None and proc_b.poll() is None:
+                proc_b.terminate()
+                try:
+                    proc_b.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc_b.kill()
+            if proc_a.poll() is None:
+                proc_a.terminate()
+                try:
+                    proc_a.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc_a.kill()
+
 
 
 class TestMultihostPaxosScript(unittest.TestCase):
@@ -191,5 +373,9 @@ if __name__ == "__main__":
         _run_bootstrap_port(int(sys.argv[2]))
     elif len(sys.argv) >= 2 and sys.argv[1] == "join-serve" and len(sys.argv) == 4:
         _run_join_serve(int(sys.argv[2]), sys.argv[3])
+    elif len(sys.argv) >= 2 and sys.argv[1] == "bootstrap-recv-once" and len(sys.argv) == 3:
+        _run_bootstrap_recv_once(int(sys.argv[2]))
+    elif len(sys.argv) >= 2 and sys.argv[1] == "join-send-once" and len(sys.argv) == 5:
+        _run_join_send_once(int(sys.argv[2]), sys.argv[3], sys.argv[4])
     else:
         unittest.main()
