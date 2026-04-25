@@ -1,0 +1,25 @@
+{
+  "name": "protocol",
+  "version": "1.0.0",
+  "description": "",
+  "main": "network/hyperswarm/index.js",
+  "scripts": {
+    "start": "node .",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Peix-a-la-GachkUPC/protocol.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Peix-a-la-GachkUPC/protocol/issues"
+  },
+  "homepage": "https://github.com/Peix-a-la-GachkUPC/protocol#readme",
+  "dependencies": {
+    "hyperswarm": "^4.17.0"
+  }
+}

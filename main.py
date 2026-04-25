@@ -411,11 +411,12 @@ async def run_bridge(
     connect_peer: str | None,
     poll_interval: float,
     node_id: str,
-    http_host: str,
-    http_port: int,
     logger: logging.Logger,
+    http_host: str|None = None,
+    http_port: int|None = None,
+    protocol: str = "HTTP"
 ) -> None:
-    connection.setup("HTTP", host=http_host, port=http_port)
+    connection.setup(protocol, host=http_host, port=http_port)
     connection.create(connect_peer)
 
     bridge = ExtensionBridge(host=ws_host, port=ws_port)
@@ -466,9 +467,10 @@ def main() -> None:
                 connect_peer=_require_config(config, "NETWORK_CONNECT_PEER"),
                 poll_interval=_require_config(config, "POLL_INTERVAL"),
                 node_id=_resolve_node_id(config),
+                logger=logger,
                 http_host=_require_config(config, "HTTP_HOST"),
                 http_port=_require_config(config, "HTTP_PORT"),
-                logger=logger,
+                protocol=_require_config(config, "PROTOCOL")
             )
         )
     except KeyboardInterrupt:
