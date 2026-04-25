@@ -3,10 +3,13 @@ import asyncio
 import importlib.util
 import json
 import logging
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 from typing import Any, Callable
 
 from network import connection
@@ -33,10 +36,12 @@ class EditConsensus:
         node_id: str,
         logger: logging.Logger,
         emit_to_bridge: Callable[[Any], None],
+        send_to_network: Callable[[str], None],
     ) -> None:
         self.node_id = node_id
         self.logger = logger
         self.emit_to_bridge = emit_to_bridge
+        self.send_to_network = send_to_network
         self.last_timestamp = 0
         self.best_proposal: Proposal | None = None
         self.active_proposal = False
@@ -192,7 +197,7 @@ class EditConsensus:
             proposal.tstamp,
             accepted,
         )
-        connection.send(json.dumps(message, ensure_ascii=False))
+        self.send_to_network(json.dumps(message, ensure_ascii=False))
 
     def _send_proposal(self, proposal: Proposal) -> None:
         message = {
@@ -202,7 +207,7 @@ class EditConsensus:
             "data": proposal.data,
         }
         self.logger.debug("Broadcast proposal tstamp=%d origin=%s", proposal.tstamp, proposal.origin)
-        connection.send(json.dumps(message, ensure_ascii=False))
+        self.send_to_network(json.dumps(message, ensure_ascii=False))
 
     def _try_commit_active_proposal(self) -> None:
         if not self.active_proposal or self.best_proposal is None:
@@ -412,6 +417,153 @@ class EditConsensus:
         return None
 
 
+class DebugController:
+    TARGETS = {"network_in", "network_out"}
+
+    def __init__(self, logger: logging.Logger) -> None:
+        self.logger = logger
+        self._paused: dict[str, bool] = {"network_in": False, "network_out": False}
+        self._delay_ms: dict[str, int] = {"network_in": 0, "network_out": 0}
+        self._network_in_queue: deque[str] = deque()
+        self._network_out_queue: deque[str] = deque()
+        self._lock = threading.Lock()
+
+    def pause(self, target: str) -> bool:
+        if target not in self.TARGETS:
+            return False
+        with self._lock:
+            self._paused[target] = True
+        self.logger.info("Debug pause enabled for %s", target)
+        return True
+
+    def resume(self, target: str) -> bool:
+        if target not in self.TARGETS:
+            return False
+        with self._lock:
+            self._paused[target] = False
+        self.logger.info("Debug pause disabled for %s", target)
+        return True
+
+    def set_delay(self, target: str, delay_ms: int) -> bool:
+        if target not in self.TARGETS or delay_ms < 0:
+            return False
+        with self._lock:
+            self._delay_ms[target] = delay_ms
+        self.logger.info("Debug delay set target=%s delay_ms=%d", target, delay_ms)
+        return True
+
+    def state(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "paused": dict(self._paused),
+                "delay_ms": dict(self._delay_ms),
+                "queue_sizes": {
+                    "network_in": len(self._network_in_queue),
+                    "network_out": len(self._network_out_queue),
+                },
+            }
+
+    def queue_or_allow_network_in(self, payload: str) -> bool:
+        with self._lock:
+            if self._paused["network_in"]:
+                self._network_in_queue.append(payload)
+                return True
+        return False
+
+    def take_network_in_batch_if_open(self) -> list[str]:
+        with self._lock:
+            if self._paused["network_in"] or not self._network_in_queue:
+                return []
+            items = list(self._network_in_queue)
+            self._network_in_queue.clear()
+            return items
+
+    def queue_or_allow_network_out(self, payload: str) -> bool:
+        with self._lock:
+            if self._paused["network_out"]:
+                self._network_out_queue.append(payload)
+                return True
+        return False
+
+    def take_network_out_batch_if_open(self) -> list[str]:
+        with self._lock:
+            if self._paused["network_out"] or not self._network_out_queue:
+                return []
+            items = list(self._network_out_queue)
+            self._network_out_queue.clear()
+            return items
+
+    def delay_seconds(self, target: str) -> float:
+        with self._lock:
+            delay_ms = self._delay_ms.get(target, 0)
+        return delay_ms / 1000.0
+
+
+def _start_debug_server(host: str, port: int, controller: DebugController) -> ThreadingHTTPServer:
+    class DebugHandler(BaseHTTPRequestHandler):
+        def _write_json(self, status: int, payload: dict[str, Any]) -> None:
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self) -> None:
+            parsed = urlparse(self.path)
+            if parsed.path != "/debug/state":
+                self._write_json(404, {"error": "not found"})
+                return
+            self._write_json(200, controller.state())
+
+        def do_POST(self) -> None:
+            parsed = urlparse(self.path)
+            args = parse_qs(parsed.query)
+
+            if parsed.path == "/debug/pause":
+                target = args.get("target", [""])[0]
+                if not controller.pause(target):
+                    self._write_json(400, {"error": "invalid target", "target": target})
+                    return
+                self._write_json(200, controller.state())
+                return
+
+            if parsed.path == "/debug/resume":
+                target = args.get("target", [""])[0]
+                if not controller.resume(target):
+                    self._write_json(400, {"error": "invalid target", "target": target})
+                    return
+                self._write_json(200, controller.state())
+                return
+
+            if parsed.path == "/debug/delay":
+                target = args.get("target", [""])[0]
+                raw_ms = args.get("ms", [""])[0]
+                try:
+                    delay_ms = int(raw_ms)
+                except ValueError:
+                    self._write_json(400, {"error": "invalid ms", "ms": raw_ms})
+                    return
+                if not controller.set_delay(target, delay_ms):
+                    self._write_json(
+                        400,
+                        {"error": "invalid target or delay", "target": target, "ms": delay_ms},
+                    )
+                    return
+                self._write_json(200, controller.state())
+                return
+
+            self._write_json(404, {"error": "not found"})
+
+        def log_message(self, format: str, *args: Any) -> None:
+            return
+
+    server = ThreadingHTTPServer((host, port), DebugHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server
+
+
 def _encode_for_network(message: Message) -> str:
     if isinstance(message, str):
         return message
@@ -479,10 +631,23 @@ async def run_bridge(
     logger: logging.Logger,
     http_host: str|None = None,
     http_port: int|None = None,
-    protocol: str = "HTTP"
+    protocol: str = "HTTP",
+    debug_control_enabled: bool = False,
+    debug_control_host: str = "127.0.0.1",
+    debug_control_port: int = 43000,
 ) -> None:
     connection.setup(protocol, host=http_host, port=http_port)
     connection.create(connect_peer)
+    controller = DebugController(logger=logger)
+    debug_server: ThreadingHTTPServer | None = None
+
+    if debug_control_enabled:
+        debug_server = _start_debug_server(debug_control_host, debug_control_port, controller)
+        logger.info(
+            "Debug control listening on http://%s:%s",
+            debug_control_host,
+            debug_control_port,
+        )
 
     bridge = ExtensionBridge(host=ws_host, port=ws_port)
 
@@ -493,7 +658,18 @@ async def run_bridge(
     def emit_to_bridge(payload: Any) -> None:
         asyncio.create_task(send_network_recv(payload))
 
-    consensus = EditConsensus(node_id=node_id, logger=logger, emit_to_bridge=emit_to_bridge)
+    def send_to_network(payload: str) -> None:
+        if controller.queue_or_allow_network_out(payload):
+            logger.debug("Queued outbound network message while paused")
+            return
+        asyncio.create_task(_send_to_network_with_delay(controller, payload))
+
+    consensus = EditConsensus(
+        node_id=node_id,
+        logger=logger,
+        emit_to_bridge=emit_to_bridge,
+        send_to_network=send_to_network,
+    )
 
     async def on_extension_message(message: Message) -> None:
         if isinstance(message, dict) and "value" in message:
@@ -514,10 +690,41 @@ async def run_bridge(
         while True:
             incoming = connection.nrecv()
             if incoming is not None:
-                consensus.on_network_raw(incoming)
+                if controller.queue_or_allow_network_in(incoming):
+                    logger.debug("Queued inbound network message while paused")
+                else:
+                    await _handle_network_in_with_delay(controller, consensus, incoming)
+
+            for queued_incoming in controller.take_network_in_batch_if_open():
+                await _handle_network_in_with_delay(controller, consensus, queued_incoming)
+
+            for queued_outgoing in controller.take_network_out_batch_if_open():
+                await _send_to_network_with_delay(controller, queued_outgoing)
+
             await asyncio.sleep(poll_interval)
     finally:
+        if debug_server is not None:
+            debug_server.shutdown()
+            debug_server.server_close()
         await bridge.stop()
+
+
+async def _handle_network_in_with_delay(
+    controller: DebugController,
+    consensus: EditConsensus,
+    incoming: str,
+) -> None:
+    delay_seconds = controller.delay_seconds("network_in")
+    if delay_seconds > 0:
+        await asyncio.sleep(delay_seconds)
+    consensus.on_network_raw(incoming)
+
+
+async def _send_to_network_with_delay(controller: DebugController, payload: str) -> None:
+    delay_seconds = controller.delay_seconds("network_out")
+    if delay_seconds > 0:
+        await asyncio.sleep(delay_seconds)
+    connection.send(payload)
 
 def main() -> None:
     args = _parse_args()
@@ -535,7 +742,10 @@ def main() -> None:
                 logger=logger,
                 http_host=_require_config(config, "HTTP_HOST"),
                 http_port=_require_config(config, "HTTP_PORT"),
-                protocol=_require_config(config, "PROTOCOL")
+                protocol=_require_config(config, "PROTOCOL"),
+                debug_control_enabled=bool(getattr(config, "DEBUG_CONTROL_ENABLED", False)),
+                debug_control_host=str(getattr(config, "DEBUG_CONTROL_HOST", "127.0.0.1")),
+                debug_control_port=int(getattr(config, "DEBUG_CONTROL_PORT", 43000)),
             )
         )
     except KeyboardInterrupt:
