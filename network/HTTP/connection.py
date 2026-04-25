@@ -5,10 +5,6 @@ from threading import Thread
 from sys import argv
 import json
 import requests
-try:
-    import conf
-except ImportError:
-    raise ImportError("Copy conf.py.example to conf.py and configure it")
 
 HOST_NAME = "0.0.0.0"
 SERVER_PORT = 8080
@@ -29,9 +25,12 @@ def _add_peer(raw_url: str) -> None:
         peer_list.append(peer_url)
 
 
-def setup():
-    HOST_NAME = conf.HTTP_HOST
-    SERVER_PORT = conf.HTTP_PORT
+def setup(host: str | None = None, port: int | None = None):
+    global HOST_NAME, SERVER_PORT
+    if host is not None:
+        HOST_NAME = host
+    if port is not None:
+        SERVER_PORT = port
 
 def number_of_peers() -> int:
     return len(peer_list)
@@ -131,7 +130,6 @@ def send(value:str):
     Args:
         value (str): data to send
     """
-    print(peer_list)
     for peer_url in peer_list:
         url = peer_url+"/data"
         params = {'value': value}
@@ -168,15 +166,14 @@ def create_connections(connect_peer:str, port):
     peer_list = []
     for peer_url in json.loads(r.text):
         _add_peer(peer_url)
-    print(peer_list, type(peer_list))
     _add_peer(connect_peer)
     for peer_url in peer_list:
         r = requests.get(url = f"{peer_url}/connect?port={port}")
 
 def start_server(
     connect_peer: str | None = None,
-    host: str = HOST_NAME,
-    port: int = SERVER_PORT,
+    host: str | None = None,
+    port: int | None = None,
     public_url: str | None = None,
 ):
     """Starts the server
@@ -189,8 +186,13 @@ def start_server(
     """
     global HOST_NAME, SERVER_PORT
 
-    HOST_NAME = host
-    SERVER_PORT = port
+    if host is not None:
+        HOST_NAME = host
+    if port is not None:
+        SERVER_PORT = port
+
+    host = HOST_NAME
+    port = SERVER_PORT
 
     if not connect_peer == None:
         create_connections(connect_peer, port)

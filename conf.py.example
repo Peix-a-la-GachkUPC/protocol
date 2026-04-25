@@ -1,6 +1,10 @@
 WS_HOST = "127.0.0.1"
 WS_PORT = 42069
+NETWORK_CONNECT_PEER = None
+NETWORK_NODE_ID = "http://127.0.0.1:8080"
 HTTP_HOST = "0.0.0.0"
 HTTP_PORT = 8080
-HTTP_CONNECT_PEER = None
 POLL_INTERVAL = 0.05
+
+# Set to True to enable verbose proposal/consensus logs.
+PROTOCOL_DEBUG = False

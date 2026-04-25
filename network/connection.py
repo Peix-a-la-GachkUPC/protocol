@@ -58,18 +58,21 @@ def send(data:str):
 def number_of_peers() -> int:
     match(PROTOCOL):
         case ("HTTP"):
-            http_connection.number_of_peers(data)
+            return http_connection.number_of_peers()
         case ("hyperswarm"):
-            hyperswarm_connection.number_of_peers(data)
+            return hyperswarm_connection.number_of_peers()
         case (_):
             raise ValueError("Protocol desconegut")
 
-def setup(protocol:str):
+def setup(protocol:str, **kwargs):
     global PROTOCOL
     PROTOCOL = protocol
     match (PROTOCOL):
         case ("HTTP"):
-            http_connection.setup()
+            http_connection.setup(
+                host=kwargs.get("host"),
+                port=kwargs.get("port"),
+            )
         case ("hyperswarm"):
             pass
         case (_):
@@ -93,4 +96,3 @@ def create(discover_peer:str):
             hyperswarm_connection.create(discover_peer)
         case (_):
             raise ValueError("Protocol desconegut")
-
