@@ -1,5 +1,6 @@
-import HTTP.connection
-import hyperswarm.connection
+from network.HTTP import connection as HTTP_connection
+from network.Bluetooth import connection as Bluetooth_connection
+from network.hyperswarm import connection as hyperswarm_connection
 
 PROTOCOL = ""
 
@@ -14,9 +15,11 @@ def recv() -> str:
     """
     match (PROTOCOL):
         case ("HTTP"):
-            return HTTP.connection.recv()
+            return HTTP_connection.recv()
         case ("hyperswarm"):
-            return hyperswarm.connection.recv()
+            return hyperswarm_connection.recv()
+        case ("Bluetooth"):
+            return Bluetooth_connection.recv()
         case (_):
             raise ValueError("Protocol desconegut")
 
@@ -31,9 +34,11 @@ def nrecv() -> str|None:
     """
     match (PROTOCOL):
         case ("HTTP"):
-            return HTTP.connection.nrecv()
+            return HTTP_connection.nrecv()
         case ("hyperswarm"):
-            return hyperswarm.connection.nrecv()
+            return hyperswarm_connection.nrecv()
+        case ("Bluetooth"):
+            return Bluetooth_connection.nrecv()
         case (_):
             raise ValueError("Protocol desconegut")
     
@@ -48,9 +53,11 @@ def send(data:str):
     """
     match (PROTOCOL):
         case ("HTTP"):
-            HTTP.connection.send(data)
+            HTTP_connection.send(data)
         case ("hyperswarm"):
-            hyperswarm.connection.send(data)
+            hyperswarm_connection.send(data)
+        case ("Bluetooth"):
+            Bluetooth_connection.send(data)
         case (_):
             raise ValueError("Protocol desconegut")
 
@@ -68,8 +75,10 @@ def create(protocol: str, discover_peer:str):
     PROTOCOL = protocol
     match (PROTOCOL):
         case ("HTTP"):
-            HTTP.connection.start_server(connect_peer=discover_peer)
+            HTTP_connection.start_server(connect_peer=discover_peer)
         case ("hyperswarm"):
-            hyperswarm.connection.create(discover_peer)
+            hyperswarm_connection.create(discover_peer)
+        case ("Bluetooth"):
+            Bluetooth_connection.create(discover_peer)
         case (_):
             raise ValueError("Protocol desconegut")
