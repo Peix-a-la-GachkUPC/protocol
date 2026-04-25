@@ -92,7 +92,7 @@ class MyServer(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
-        _add_peer(args["url"][0])
+        _add_peer(f"http://{self.client_address[0]}:{self.client_address[1]}")
 
         self.send_response(200)
         self.send_header("Content-type", "text/html")
@@ -167,7 +167,6 @@ def create_connections(connect_peer:str):
     _add_peer(connect_peer)
     for peer_url in peer_list:
         r = requests.get(url = f"{peer_url}/connect?url={URL}")
-
 
 def start_server(
     connect_peer: str | None = None,
