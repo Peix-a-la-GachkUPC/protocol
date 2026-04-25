@@ -90,13 +90,20 @@ class MyServer(BaseHTTPRequestHandler):
             args (dict[str, str]): arguments (url)
         """
         global peer_list
-        if not "port" in args.keys():
+        if "url" in args.keys() and len(args["url"]) > 0:
+            _add_peer(args["url"][0])
+            self.send_response(200)
+            self.send_header("Content-type", "text/html")
+            self.end_headers()
+            return
+
+        if "port" not in args.keys():
             self.send_response(400)
             self.send_header("Content-type", "text/html")
             self.end_headers()
             return
 
-        _add_peer(f"http://{self.client_address[0]}:{args["port"][0]}")
+        _add_peer(f"http://{self.client_address[0]}:{args['port'][0]}")
 
         self.send_response(200)
         self.send_header("Content-type", "text/html")
@@ -162,6 +169,8 @@ def create_connections(connect_peer:str, port):
         connect_peer (str): First peer to connect to.
     """
     global peer_list
+
+    print("connect")
     connect_peer = _normalize_url(connect_peer)
     r = requests.get(url = connect_peer+"/get_peers")
     print("hola:",r.text)
@@ -171,7 +180,11 @@ def create_connections(connect_peer:str, port):
     print(peer_list, type(peer_list))
     _add_peer(connect_peer)
     for peer_url in peer_list:
-        r = requests.get(url = f"{peer_url}/connect?port={port}")
+        requests.get(
+            url=f"{peer_url}/connect",
+            params={"url": URL},
+            verify=False,
+        )
 
 def start_server(
     connect_peer: str | None = None,
@@ -198,6 +211,8 @@ def start_server(
         URL = f"http://127.0.0.1:{port}"
     else:
         URL = f"http://{host}:{port}"
+
+    print("connect_peer", connect_peer)
 
     if not connect_peer == None:
         create_connections(connect_peer, port)

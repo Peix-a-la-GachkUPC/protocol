@@ -93,7 +93,11 @@ def create(discover_peer:str|None):
     global PROTOCOL
     match (PROTOCOL):
         case ("HTTP"):
-            http_connection.start_server(connect_peer=discover_peer)
+            public_url = getattr(conf, "HTTP_PUBLIC_URL", None) if conf is not None else None
+            http_connection.start_server(
+                connect_peer=discover_peer,
+                public_url=public_url,
+            )
         case ("hyperswarm"):
             if discover_peer is not None:
                 hyperswarm_connection.create(discover_peer)
