@@ -43,7 +43,7 @@ def send(data:str):
     """
     match (PROTOCOL):
         case ("HTTP"):
-            HTTP.connection.recv(data)
+            HTTP.connection.send(data)
         case (_):
             raise ValueError("Protocol desconegut")
 
@@ -57,6 +57,7 @@ def create(protocol: str, discover_peer:str):
     Raises:
         ValueError: If incorrect protocol is chosen
     """
+    global PROTOCOL
     PROTOCOL = protocol
     match (PROTOCOL):
         case ("HTTP"):
