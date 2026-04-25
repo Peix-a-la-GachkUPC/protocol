@@ -247,9 +247,7 @@ class EditConsensus:
         self.active_proposal_votes = set()
 
         if rejected.origin == self.node_id:
-            if self.active_local_edit is not None:
-                self.pending_local_edits.appendleft(self.active_local_edit)
-                self.active_local_edit = None
+            self._rollback_rebase_reapply_uncommitted_locals()
 
         self._try_start_next_local_proposal()
 
@@ -345,6 +343,73 @@ class EditConsensus:
 
             shift = min(remote_len, local_index - remote_index)
             local_op["index"] = local_index - shift
+
+    def _rollback_rebase_reapply_uncommitted_locals(self) -> None:
+        uncommitted_edits = self._snapshot_uncommitted_local_edits()
+        if not uncommitted_edits:
+            self.active_local_edit = None
+            return
+
+        rollback_ops = self._inverse_edits(uncommitted_edits)
+        if rollback_ops:
+            self.logger.info("Rolling back %d uncommitted local ops", len(rollback_ops))
+            self.emit_to_bridge(rollback_ops)
+
+        self.active_local_edit = None
+        self.pending_local_edits = deque(uncommitted_edits)
+
+        reapply_ops = self._flatten_ops(uncommitted_edits)
+        if reapply_ops:
+            self.logger.info("Reapplying %d uncommitted local ops", len(reapply_ops))
+            self.emit_to_bridge(reapply_ops)
+
+    def _snapshot_uncommitted_local_edits(self) -> list[Any]:
+        edits: list[Any] = []
+        if self.active_local_edit is not None:
+            edits.append(self.active_local_edit)
+        edits.extend(self.pending_local_edits)
+        return edits
+
+    def _flatten_ops(self, edits: list[Any]) -> list[dict[str, Any]]:
+        flattened: list[dict[str, Any]] = []
+        for payload in edits:
+            ops = self._as_ops(payload)
+            if ops is None:
+                continue
+            flattened.extend(ops)
+        return flattened
+
+    def _inverse_edits(self, edits: list[Any]) -> list[dict[str, Any]]:
+        inverse_ops: list[dict[str, Any]] = []
+        for payload in reversed(edits):
+            ops = self._as_ops(payload)
+            if ops is None:
+                continue
+
+            for op in reversed(ops):
+                inverse = self._inverse_op(op)
+                if inverse is None:
+                    self.logger.warning("Could not invert local op: %s", op)
+                    continue
+                inverse_ops.append(inverse)
+        return inverse_ops
+
+    def _inverse_op(self, op: dict[str, Any]) -> dict[str, Any] | None:
+        if "index" not in op or not isinstance(op["index"], int):
+            return None
+
+        index = op["index"]
+
+        if "add" in op and isinstance(op["add"], str):
+            return {"index": index, "del": len(op["add"])}
+
+        if "del" in op and isinstance(op["del"], int):
+            deleted_text = op.get("deleted_text")
+            if isinstance(deleted_text, str):
+                return {"index": index, "add": deleted_text}
+            return None
+
+        return None
 
 
 def _encode_for_network(message: Message) -> str:
