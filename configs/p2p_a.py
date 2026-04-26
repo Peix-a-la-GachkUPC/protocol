@@ -1,7 +1,7 @@
 WS_HOST = "127.0.0.1"
 WS_PORT = 42069
 
-NETWORK_CONNECT_PEER = "topicforhackupc22"
+NETWORK_CONNECT_PEER = "topicforhackupc21"
 NETWORK_NODE_ID = "alias1"
 
 HTTP_HOST = "0.0.0.0"
