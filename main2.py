@@ -167,10 +167,14 @@ async def run_bridge(
                 continue
 
             tstamp = data["tstamp"]
+            inserted = False
             for i in range(len(history) - 1, -1, -1):
                 if history[i]["tstamp"] <= tstamp:
                     history.insert(i + 1, data)
+                    inserted = True
                     break
+            if not inserted:
+                history.insert(0, data)
 
     finally:
         await bridge.stop()
