@@ -299,7 +299,7 @@ class EditConsensus:
         for entry in payload:
             if not isinstance(entry, dict):
                 return None
-            if "index" not in entry:
+            if "pos" not in entry and "index" not in entry:
                 return None
             ops.append(dict(entry))
         return ops
@@ -312,30 +312,122 @@ class EditConsensus:
         rebased = [dict(op) for op in local_ops]
         for remote_op in remote_ops:
             for local_op in rebased:
-                self._shift_local_index(remote_op, local_op, remote_origin)
+                self._shift_local_position(remote_op, local_op, remote_origin)
         return rebased
 
-    def _shift_local_index(self, remote_op: dict[str, Any], local_op: dict[str, Any], remote_origin: str) -> None:
-        if "index" not in local_op:
-            return
-        if not isinstance(local_op["index"], int):
-            return
+    def _pos_from_op(self, op: dict[str, Any]) -> tuple[int, int] | None:
+        pos = op.get("pos")
+        if not isinstance(pos, dict):
+            return None
+        line = pos.get("line")
+        column = pos.get("column")
+        if not isinstance(line, int) or not isinstance(column, int):
+            return None
+        return (max(0, line), max(0, column))
 
-        if "index" not in remote_op:
-            return
-        if not isinstance(remote_op["index"], int):
-            return
+    def _pos_set(self, op: dict[str, Any], pos: tuple[int, int]) -> None:
+        line, column = pos
+        op["pos"] = {"line": int(max(0, line)), "column": int(max(0, column))}
 
+    def _same_file(self, remote_op: dict[str, Any], local_op: dict[str, Any]) -> bool:
         remote_file = remote_op.get("file")
         local_file = local_op.get("file")
         if isinstance(remote_file, str) and isinstance(local_file, str):
-            if remote_file != local_file:
-                return
-        elif isinstance(remote_file, str) != isinstance(local_file, str):
+            return remote_file == local_file
+        if isinstance(remote_file, str) != isinstance(local_file, str):
+            return False
+        return True
+
+    def _cmp_pos(self, a: tuple[int, int], b: tuple[int, int]) -> int:
+        if a[0] != b[0]:
+            return -1 if a[0] < b[0] else 1
+        if a[1] != b[1]:
+            return -1 if a[1] < b[1] else 1
+        return 0
+
+    def _end_pos_for_span(self, start: tuple[int, int], span_text: str) -> tuple[int, int]:
+        parts = span_text.split("\n")
+        if len(parts) == 1:
+            return (start[0], start[1] + len(span_text))
+        return (start[0] + (len(parts) - 1), len(parts[-1]))
+
+    def _shift_local_position(self, remote_op: dict[str, Any], local_op: dict[str, Any], remote_origin: str) -> None:
+        if not self._same_file(remote_op, local_op):
             return
 
-        local_index = local_op["index"]
-        remote_index = remote_op["index"]
+        remote_pos = self._pos_from_op(remote_op)
+        local_pos = self._pos_from_op(local_op)
+        if remote_pos is not None and local_pos is not None:
+            remote_line, remote_col = remote_pos
+            local_line, local_col = local_pos
+
+            if "add" in remote_op and isinstance(remote_op["add"], str):
+                add_text = remote_op["add"]
+                if not add_text:
+                    return
+
+                same_pos_remote_first = self._cmp_pos(remote_pos, local_pos) == 0 and remote_origin < self.node_id
+                if self._cmp_pos(remote_pos, local_pos) < 0 or same_pos_remote_first:
+                    parts = add_text.split("\n")
+                    newline_count = len(parts) - 1
+                    if newline_count == 0:
+                        if local_line == remote_line:
+                            local_col += len(add_text)
+                    else:
+                        last_len = len(parts[-1])
+                        if local_line > remote_line:
+                            local_line += newline_count
+                        elif local_line == remote_line:
+                            local_line += newline_count
+                            local_col = last_len + max(0, local_col - remote_col)
+                    self._pos_set(local_op, (local_line, local_col))
+                return
+
+            if "del" in remote_op and isinstance(remote_op["del"], int):
+                remote_len = remote_op["del"]
+                if remote_len <= 0:
+                    return
+
+                # Match the old index behavior: if deletion starts at/after local position, do not shift.
+                if self._cmp_pos(remote_pos, local_pos) >= 0:
+                    return
+
+                deleted_text = remote_op.get("deleted_text")
+                if isinstance(deleted_text, str):
+                    remote_end = self._end_pos_for_span(remote_pos, deleted_text)
+                else:
+                    remote_end = (remote_line, remote_col + remote_len)
+
+                cmp_end = self._cmp_pos(local_pos, remote_end)
+                if cmp_end < 0:
+                    # local position inside deleted span -> clamp to start
+                    self._pos_set(local_op, remote_pos)
+                    return
+
+                # local position after deleted span -> shift backwards
+                end_line, end_col = remote_end
+                removed_parts = (deleted_text if isinstance(deleted_text, str) else ("x" * remote_len)).split("\n")
+                removed_newlines = len(removed_parts) - 1
+                if removed_newlines == 0:
+                    if local_line == remote_line:
+                        local_col = max(0, local_col - remote_len)
+                else:
+                    if local_line > end_line:
+                        local_line -= removed_newlines
+                    elif local_line == end_line:
+                        local_line -= removed_newlines
+                        local_col = remote_col + max(0, local_col - end_col)
+                self._pos_set(local_op, (local_line, local_col))
+                return
+
+        # Legacy fallback: index-based rebasing if both sides still use index.
+        if "index" not in local_op or not isinstance(local_op.get("index"), int):
+            return
+        if "index" not in remote_op or not isinstance(remote_op.get("index"), int):
+            return
+
+        local_index = int(local_op["index"])
+        remote_index = int(remote_op["index"])
 
         if "add" in remote_op and isinstance(remote_op["add"], str):
             remote_len = len(remote_op["add"])
@@ -408,20 +500,27 @@ class EditConsensus:
         return inverse_ops
 
     def _inverse_op(self, op: dict[str, Any]) -> dict[str, Any] | None:
-        if "index" not in op or not isinstance(op["index"], int):
+        pos = self._pos_from_op(op)
+        index = op.get("index") if isinstance(op.get("index"), int) else None
+        if pos is None and index is None:
             return None
 
-        index = op["index"]
+        position_field: dict[str, Any]
+        if pos is not None:
+            position_field = {"pos": {"line": pos[0], "column": pos[1]}}
+        else:
+            position_field = {"index": index}
+
         file_value = op.get("file")
         file_field: dict[str, Any] = {"file": file_value} if isinstance(file_value, str) else {}
 
         if "add" in op and isinstance(op["add"], str):
-            return {"index": index, "del": len(op["add"]), **file_field}
+            return {**position_field, "del": len(op["add"]), **file_field}
 
         if "del" in op and isinstance(op["del"], int):
             deleted_text = op.get("deleted_text")
             if isinstance(deleted_text, str):
-                return {"index": index, "add": deleted_text, **file_field}
+                return {**position_field, "add": deleted_text, **file_field}
             return None
 
         return None
