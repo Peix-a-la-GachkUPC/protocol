@@ -762,7 +762,8 @@ async def run_bridge(
 
     async def send_network_recv(payload: Any) -> None:
         logger.info("Applying remote edit to extension")
-        await bridge.send({"type": "network_recv", "value": _encode_for_network(payload)})
+        # Match main2.py: forward payload directly over WS (no type/value envelope).
+        await bridge.send(payload)
 
     def emit_to_bridge(payload: Any) -> None:
         asyncio.create_task(send_network_recv(payload))
@@ -781,8 +782,11 @@ async def run_bridge(
     )
 
     async def on_extension_message(message: Message) -> None:
+        # Match main2.py: frontend sends raw payloads (arrays/objects/strings).
+        # Keep compatibility with older envelopes that send {"value": ...}.
+        payload: Any
         if isinstance(message, dict) and "value" in message:
-            payload: Any = message["value"]
+            payload = message["value"]
         else:
             payload = message
 
