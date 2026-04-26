@@ -62,10 +62,6 @@ def _sort_incoming_payloads(payloads: list[str]) -> list[str]:
     return [payload for _, payload in indexed]
 
 
-def _next_wall_clock_boundary(now: float, interval_seconds: float) -> float:
-    return (int(now / interval_seconds) + 1) * interval_seconds
-
-
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run extension bridge with external config.")
     parser.add_argument(
@@ -123,7 +119,6 @@ async def run_bridge(
     ws_port: int,
     connect_peer: str | None,
     poll_interval: float,
-    flush_interval_seconds: float,
     node_id: str,
     logger: logging.Logger,
     http_host: str|None = None,
@@ -136,13 +131,11 @@ async def run_bridge(
     bridge = ExtensionBridge(host=ws_host, port=ws_port)
 
     async def on_extension_message(message: Message) -> None:
-        if isinstance(message, dict) and "value" in message:
-            payload: Any = message["value"]
-        else:
-            payload = message
-
-        logger.debug("Bridge IN payload=%s", _payload_preview(payload))
-        connection.send(_encode_for_network(payload))
+        logger.debug("Bridge IN payload=%s", message)
+        connection.send(json.dumps({
+            "tstamp": int(time.time() * 1000),
+            "data": message,
+        }))
 
 
     bridge.on_message(on_extension_message)
@@ -152,31 +145,33 @@ async def run_bridge(
     if connect_peer:
         logger.info("Connected via seed peer: %s", connect_peer)
 
-    flush_interval_seconds = max(0.01, flush_interval_seconds)
-
     try:
-        next_flush_wall = _next_wall_clock_boundary(time.time(), flush_interval_seconds)
+        history: list[dict] = []
         while True:
-            incoming_batch: list[str] = []
-            while True:
-                now_wall = time.time()
-                if now_wall >= next_flush_wall:
+            while history and history[0]["tstamp"] < (time.time() - 1.0) * 1000:
+                elem = history.pop(0)
+                logger.debug("Bridge OUT payload=%s", _payload_preview(elem["data"]))
+                await bridge.send(json.dumps(elem["data"]))
+
+            incoming = connection.nrecv()
+            if incoming is None:
+                await asyncio.sleep(poll_interval)
+                continue
+
+            data = json.loads(incoming)
+            if "tstamp" not in data or "data" not in data:
+                logger.debug("Network IN skipped invalid payload")
+                continue
+
+            if data["tstamp"] < (time.time() - 1.0) * 1000:
+                continue
+
+            tstamp = data["tstamp"]
+            for i in range(len(history) - 1, -1, -1):
+                if history[i]["tstamp"] <= tstamp:
+                    history.insert(i + 1, data)
                     break
 
-                while True:
-                    incoming = connection.nrecv()
-                    if incoming is None:
-                        break
-                    incoming_batch.append(incoming)
-
-                sleep_seconds = min(poll_interval, max(0.0, next_flush_wall - time.time()))
-                if sleep_seconds > 0:
-                    await asyncio.sleep(sleep_seconds)
-
-            for incoming in _sort_incoming_payloads(incoming_batch):
-                await bridge.send({"type": "network_recv", "value": _encode_for_network(incoming)})
-
-            next_flush_wall = _next_wall_clock_boundary(time.time(), flush_interval_seconds)
     finally:
         await bridge.stop()
 
@@ -193,7 +188,6 @@ def main() -> None:
                 ws_port=_require_config(config, "WS_PORT"),
                 connect_peer=_require_config(config, "NETWORK_CONNECT_PEER"),
                 poll_interval=_require_config(config, "POLL_INTERVAL"),
-                flush_interval_seconds=float(getattr(config, "NETWORK_IN_FLUSH_INTERVAL", 0.25)),
                 node_id=_resolve_node_id(config),
                 logger=logger,
                 http_host=_require_config(config, "HTTP_HOST"),
